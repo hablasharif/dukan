@@ -1294,28 +1294,45 @@ function getAnimeGGUrl(entry, ep, lang) {
 // ═══════════════════════════════════════════════════════════
 //  ANIDB API LOADER
 // ═══════════════════════════════════════════════════════════
-// The API is hosted on render.com: https://andbgithub.onrender.com
-// Browser behavior: visiting /21/1 in a browser redirects to /#/21/1 (SPA hash routing).
-// BUT fetch() ignores fragment redirects — it follows HTTP 301/302 Location headers only.
-// The server must expose a real JSON endpoint (not the SPA shell).
-// We probe several common patterns and accept the first one that returns valid JSON.
-const ANIDB_API_BASE   = 'https://andbgithub.onrender.com';
-const ANIDB_API_BASE_GH = 'https://hablasharif.github.io/andbgithub';
+// Endpoint: https://andbgithub.onrender.com/{malId}/{ep}
+// (the "/#/21/1" you see in the address bar is just the SPA rewriting the URL
+//  client-side after the page loads — the actual data route is /{malId}/{ep})
+//
+// Why it can still fail from fetch(): the site's own page load works because it's a
+// same-origin browser navigation, but our page (hosted on a different origin) calling
+// fetch() cross-origin needs the server to send Access-Control-Allow-Origin — and this
+// render.com server does not appear to set that header. So we:
+//   1. try a direct fetch() first (works fine if CORS is actually open), then
+//   2. fall back to routing the SAME URL through our existing CORS proxy worker
+//      (the one already used for the .m3u8/embed streams), which fetches server-side
+//      and re-serves the response with permissive CORS headers.
+const ANIDB_API_BASE = 'https://andbgithub.onrender.com';
 const _anidbApiCache = {};
 
-// Try fetching a URL and return parsed JSON, or null if it fails / returns HTML
-async function _tryFetchJSON(url) {
+function anidbApiUrl(malId, ep) {
+  return `${ANIDB_API_BASE}/${malId}/${ep}`;
+}
+
+// Try a direct (no-proxy) fetch — succeeds only if the server sends CORS headers
+async function _tryDirectFetchJSON(url) {
   try {
-    const r = await fetch(url, {
-      headers: { 'Accept': 'application/json, */*' },
-      redirect: 'follow'
-    });
+    const r = await fetch(url, { headers: { 'Accept': 'application/json' }, mode: 'cors' });
     if (!r.ok) return null;
-    const ct = r.headers.get('content-type') || '';
-    // If server returned HTML (SPA shell / 404 page), skip
-    if (ct.includes('text/html')) return null;
     const text = await r.text();
-    // Double-check: reject if response looks like HTML even with wrong content-type
+    const trimmed = text.trim();
+    if (trimmed.startsWith('<')) return null; // got HTML shell, not JSON
+    return JSON.parse(trimmed);
+  } catch (_) { return null; } // CORS block / network error → caller falls back to proxy
+}
+
+// Fetch the same URL through the existing CORS proxy worker (bypasses browser CORS
+// entirely since the worker does the request server-side)
+async function _tryProxyFetchJSON(url) {
+  try {
+    const proxied = anidbProxyUrl(url); // reuses ANIDB_PROXY worker defined below in this file
+    const r = await fetch(proxied);
+    if (!r.ok) return null;
+    const text = await r.text();
     const trimmed = text.trim();
     if (trimmed.startsWith('<')) return null;
     return JSON.parse(trimmed);
@@ -1326,92 +1343,30 @@ async function fetchAniDBStreams(malId, ep) {
   const cacheKey = `${malId}/${ep}`;
   if (_anidbApiCache[cacheKey] !== undefined) return _anidbApiCache[cacheKey];
 
-  // Fast-path: if a previous call already found the working URL pattern, use it directly
-  if (_anidbWorkingBase) {
-    const fastUrl = _anidbWorkingBase.includes('?')
-      ? `${_anidbWorkingBase}id=${malId}&ep=${ep}`
-      : `${_anidbWorkingBase}/${malId}/${ep}`;
-    const data = await _tryFetchJSON(fastUrl);
-    if (data && Array.isArray(data.streams)) {
-      const hlsStreams = data.streams
-        .filter(s => s.type === 'hls' && s.isActive !== false && s.url)
-        .sort((a, b) => {
-          if (a.audio === 'dub' && b.audio !== 'dub') return -1;
-          if (b.audio === 'dub' && a.audio !== 'dub') return 1;
-          return (b.priority || 0) - (a.priority || 0);
-        });
-      _anidbApiCache[cacheKey] = hlsStreams.length ? hlsStreams : null;
-      return _anidbApiCache[cacheKey];
-    }
-    // Working base no longer works (e.g. server restarted), reset and re-probe
-    _anidbWorkingBase = null;
+  const url = anidbApiUrl(malId, ep);
+
+  // 1) direct fetch first (cheap, works if CORS happens to be open)
+  let data = await _tryDirectFetchJSON(url);
+  // 2) fall back to the CORS proxy worker
+  if (!data) data = await _tryProxyFetchJSON(url);
+
+  if (!data || !Array.isArray(data.streams)) {
+    _anidbApiCache[cacheKey] = null;
+    return null;
   }
 
-  // ── Strategy: probe every known URL pattern in order ──────────────────────────
-  // The render.com server hosts a Node/Express backend (NOT a static file host).
-  // When accessed in a browser, /21/1 triggers a client-side redirect to /#/21/1
-  // (Express SPA fallback: serve index.html for unknown routes, let the frontend router
-  // handle /#/21/1). But the same Express app likely ALSO has a real JSON API route.
-  //
-  // Common Express SPA + API patterns:
-  //   /api/malId/ep            ← API prefix (most common)
-  //   /api/stream/malId/ep
-  //   /stream/malId/ep
-  //   /data/malId/ep
-  //   /watch/malId/ep
-  //   /malId/ep  with Accept:application/json  ← some servers content-negotiate
-  //   /?id=malId&ep=ep
-  //
-  // GitHub Pages (hablasharif.github.io/andbgithub) as secondary fallback:
-  //   /andbgithub/malId/ep          ← pre-built static JSON files
-  //   /andbgithub/malId/ep.json
-  //   /andbgithub/?id=malId&ep=ep
+  const hlsStreams = data.streams
+    .filter(s => s.type === 'hls' && s.isActive !== false && s.url)
+    .sort((a, b) => {
+      // dub always first so auto-play picks dub before sub
+      if (a.audio === 'dub' && b.audio !== 'dub') return -1;
+      if (b.audio === 'dub' && a.audio !== 'dub') return 1;
+      return (b.priority || 0) - (a.priority || 0);
+    });
 
-  const candidates = [
-    // ── render.com Express API routes ──
-    `${ANIDB_API_BASE}/api/${malId}/${ep}`,
-    `${ANIDB_API_BASE}/api/stream/${malId}/${ep}`,
-    `${ANIDB_API_BASE}/stream/${malId}/${ep}`,
-    `${ANIDB_API_BASE}/data/${malId}/${ep}`,
-    `${ANIDB_API_BASE}/watch/${malId}/${ep}`,
-    `${ANIDB_API_BASE}/watch/both/${malId}/${ep}`,
-    `${ANIDB_API_BASE}/${malId}/${ep}`,            // content-negotiation (Accept: application/json)
-    `${ANIDB_API_BASE}/?id=${malId}&ep=${ep}`,
-    `${ANIDB_API_BASE}/api?id=${malId}&ep=${ep}`,
-    // ── GitHub Pages static JSON fallback ──
-    `${ANIDB_API_BASE_GH}/${malId}/${ep}`,
-    `${ANIDB_API_BASE_GH}/${malId}/${ep}.json`,
-    `${ANIDB_API_BASE_GH}/${malId}/${ep}/index.json`,
-    `${ANIDB_API_BASE_GH}/?id=${malId}&ep=${ep}`,
-  ];
-
-  for (const url of candidates) {
-    const data = await _tryFetchJSON(url);
-    if (!data || typeof data !== 'object') continue;
-    // Validate: must have a streams array
-    if (!Array.isArray(data.streams)) continue;
-
-    const hlsStreams = data.streams
-      .filter(s => s.type === 'hls' && s.isActive !== false && s.url)
-      .sort((a, b) => {
-        // dub always before sub; then by priority desc
-        if (a.audio === 'dub' && b.audio !== 'dub') return -1;
-        if (b.audio === 'dub' && a.audio !== 'dub') return 1;
-        return (b.priority || 0) - (a.priority || 0);
-      });
-
-    _anidbApiCache[cacheKey] = hlsStreams.length ? hlsStreams : null;
-    // Cache the working base URL so future episodes skip the probe
-    _anidbWorkingBase = url.replace(`/${malId}/${ep}`, '').replace(`/?id=${malId}&ep=${ep}`, '');
-    return _anidbApiCache[cacheKey];
-  }
-
-  _anidbApiCache[cacheKey] = null;
-  return null;
+  _anidbApiCache[cacheKey] = hlsStreams.length ? hlsStreams : null;
+  return _anidbApiCache[cacheKey];
 }
-
-// Remembers which URL pattern worked so repeat calls are instant
-let _anidbWorkingBase = null;
 
 function setAniDBStatus(text, found) {
   const row = document.getElementById('anidb-status-row'); const span = document.getElementById('anidb-status-text');
@@ -1422,22 +1377,33 @@ function setAniDBStatus(text, found) {
   row.style.color = found ? 'var(--green)' : 'var(--text2)';
 }
 
+// Tracks which malId/ep AniDB has already been fetched for, so re-clicking the
+// tab for the SAME episode doesn't re-fetch, but switching episodes does.
+let _anidbFetchedFor = null;
+
+// Called ONLY when the user clicks the AniDB tab (see switchSrc) — not automatically
+// on every episode load, to avoid unnecessary requests to a possibly-slow render.com
+// free-tier instance (cold starts).
 async function fetchAniDBForCurrentMedia() {
   if (!playerMalId) return;
+  const key = `${playerMalId}/${playerEp}`;
+  if (_anidbFetchedFor === key && anidbEntry) { renderAniDBList(); return; } // already have it
+
   anidbEntry = null;
   setAniDBStatus('Checking AniDB…', false);
+  document.getElementById('srv-loading').classList.add('show');
   try {
     const streams = await fetchAniDBStreams(playerMalId, playerEp);
+    _anidbFetchedFor = key;
     if (streams && streams.length) {
       anidbEntry = streams;
       const hasDub = streams.some(s => s.audio === 'dub');
-      const hasSub = streams.some(s => s.audio === 'sub' || s.audio !== 'dub');
+      const hasSub = streams.some(s => s.audio !== 'dub');
       const parts = [];
       if (hasDub) parts.push('DUB');
       if (hasSub) parts.push('SUB');
       setAniDBStatus(`✓ AniDB — ${parts.join(' + ')} available`, true);
       document.getElementById('tab-anidb').style.opacity = '1';
-      if (activeSrc === 'anidb') renderAniDBList();
     } else {
       setAniDBStatus('Not found on AniDB API', false);
       document.getElementById('tab-anidb').style.opacity = '0.4';
@@ -1445,6 +1411,9 @@ async function fetchAniDBForCurrentMedia() {
   } catch(e) {
     console.error('AniDB fetch error:', e);
     setAniDBStatus('AniDB lookup failed — check console', false);
+  } finally {
+    document.getElementById('srv-loading').classList.remove('show');
+    if (activeSrc === 'anidb') renderAniDBList();
   }
 }
 
@@ -1961,14 +1930,17 @@ async function loadEpisode(malId, ep, lang) {
   updateSideEpActive(ep);
   setM4UStatus('', false); document.getElementById('tab-m4u').style.opacity = '0.4';
   setAGGStatus('', false); document.getElementById('tab-agg').style.opacity = '0.4';
+  // AniDB is lazy-loaded (only fetched when the user clicks the AniDB tab) —
+  // just reset state here so a stale previous episode's data isn't shown.
   setAniDBStatus('', false); document.getElementById('tab-anidb').style.opacity = '0.4';
+  anidbEntry = null; _anidbFetchedFor = null;
   const megaSrc = `https://megaplay.buzz/stream/mal/${malId}/${ep}/${lang}?autostart=true`;
   loadIframe(megaSrc);
   serverData = [{ key: 'megaplay', label: 'MegaPlay', badge: 'MAL', url: megaSrc, source: 'anisantch', adBlock: false }];
   hianimeEntry = null; animeggEntry = null; activeServer = serverData[0];
   document.getElementById('qual-row').innerHTML = ''; document.getElementById('srv-list-inner').innerHTML = '';
   document.getElementById('srv-loading').classList.add('show');
-  const [aEntry, hiEntry] = await Promise.all([fetchACEntry(malId, ep, lang), fetchHiEntry(malId, ep), fetchSkipTimes(malId, ep), fetchM4UForCurrentMedia(), fetchAnimeGGForCurrentMedia(), fetchAniDBForCurrentMedia()]);
+  const [aEntry, hiEntry] = await Promise.all([fetchACEntry(malId, ep, lang), fetchHiEntry(malId, ep), fetchSkipTimes(malId, ep), fetchM4UForCurrentMedia(), fetchAnimeGGForCurrentMedia()]);
   document.getElementById('srv-loading').classList.remove('show');
   if (aEntry)  serverData = [serverData[0], ...buildACSrvs(aEntry)];
   if (hiEntry) hianimeEntry = hiEntry;
@@ -1976,7 +1948,7 @@ async function loadEpisode(malId, ep, lang) {
   if (activeSrc === 'hianime') renderHiList();
   else if (activeSrc === 'm4uhd') renderM4UList();
   else if (activeSrc === 'animegg') renderAnimeGGList();
-  else if (activeSrc === 'anidb') renderAniDBList();
+  else if (activeSrc === 'anidb') fetchAniDBForCurrentMedia(); // re-fetch for new episode since tab is currently open
   else renderACList();
   const activeFrame = document.getElementById('pf-plain').style.display !== 'none' ? document.getElementById('pf-plain') : document.getElementById('pf-sb');
   watchEnd(activeFrame, malId, ep, lang);
@@ -2225,7 +2197,7 @@ function switchSrc(src) {
     if (src === 'hianime') { hiRow.classList.add('show'); qRow.style.display = 'none'; renderHiList(); }
     else if (src === 'm4uhd') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderM4UList(); }
     else if (src === 'animegg') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAnimeGGList(); }
-    else if (src === 'anidb') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAniDBList(); }
+    else if (src === 'anidb') { hiRow.classList.remove('show'); qRow.style.display = 'none'; fetchAniDBForCurrentMedia(); }
     else { hiRow.classList.remove('show'); qRow.style.display = ''; renderACList(); }
   }
 }
