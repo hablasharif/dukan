@@ -780,6 +780,16 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
           <div id="m4u-status-row"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span id="m4u-status-text">Checking M4UHD library…</span></div>
           <div id="agg-status-row"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span id="agg-status-text">Checking AnimeGG library…</span></div>
           <div id="anidb-status-row"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span id="anidb-status-text">Checking AniDB library…</span></div>
+          <div id="anidb-manual-row" style="display:none;flex-direction:column;gap:8px;padding:10px 12px;border-radius:9px;border:1px solid var(--border2);background:var(--bg3);margin-top:4px;">
+            <div style="font-size:11px;color:var(--text2);line-height:1.5;">Auto-match to AniDB failed for this title. Paste the <b style="color:var(--accent2)">AniList ID</b> or search a title directly (same as the AniDB player itself):</div>
+            <div style="display:flex;gap:8px;">
+              <input id="anidb-manual-inp" type="text" placeholder="AniList ID (e.g. 21) or anime title…"
+                style="flex:1;padding:8px 12px;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;color:var(--text);font-size:12px;outline:none;"
+                onkeydown="if(event.key==='Enter')anidbManualSearch()">
+              <button onclick="anidbManualSearch()" style="padding:8px 16px;border-radius:8px;border:none;background:var(--accent);color:#fff;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;">Find</button>
+            </div>
+            <div id="anidb-manual-status" style="font-size:11px;color:var(--text3);min-height:14px;"></div>
+          </div>
           <div id="hi-subsrc-row">
             <button class="subsrc-pill active" data-ss="streamhg"   onclick="setHiSS('streamhg')">StreamHG</button>
             <button class="subsrc-pill"        data-ss="earnvids"   onclick="setHiSS('earnvids')">EarnVids</button>
@@ -1563,62 +1573,75 @@ async function _loadAnidbClient() {
   return _anidbClientMod;
 }
 
+// Resolves malId -> anilistId. Returns { anilistId, via } or throws with a clear reason.
+async function _resolveAnilistIdFromMal(malId) {
+  try {
+    const mapping = await loadAnimeList(); // Fribb anime-list-full.json, already used elsewhere on this site
+    const entry = Array.isArray(mapping) && mapping.find(e => Number(e.mal_id) === Number(malId));
+    if (entry && entry.anilist_id) return { anilistId: entry.anilist_id, via: 'Fribb mapping' };
+  } catch (_) {}
+
+  try {
+    const query = `query($malId:Int){Media(idMal:$malId,type:ANIME){id}}`;
+    const res = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { malId: Number(malId) } })
+    });
+    if (res.ok) {
+      const d = await res.json();
+      const id = d?.data?.Media?.id;
+      if (id) return { anilistId: id, via: 'AniList lookup' };
+    }
+  } catch (e) {
+    throw new Error(`AniList ID lookup failed (network/API error): ${e.message}`);
+  }
+
+  throw new Error(`No AniList ID mapping found for MAL ID ${malId}`);
+}
+
+// Core: given an AniList ID and an episode number, fetch AniDB streams via the
+// local client port, surfacing the exact step that failed on error.
+async function _fetchAniDBStreamsForAnilistId(anilistId, ep) {
+  const client = await _loadAnidbClient();
+  let watchData;
+  try {
+    watchData = await client.handleWatch(anilistId, 'both', Number(ep));
+  } catch (e) {
+    // Re-throw with the underlying reason (series not found on AniDB.app,
+    // episode not found, proxy error, etc.) so the UI can show it directly.
+    throw new Error(e.message || 'AniDB.app lookup failed');
+  }
+  const streams = (watchData?.streams || [])
+    .filter(s => s.url && s.isActive !== false)
+    .sort((a, b) => {
+      if (a.type === 'hls' && b.type !== 'hls') return -1;
+      if (b.type === 'hls' && a.type !== 'hls') return 1;
+      if (a.audio === 'dub' && b.audio !== 'dub') return -1;
+      if (b.audio === 'dub' && a.audio !== 'dub') return 1;
+      return (b.priority || 0) - (a.priority || 0);
+    });
+  if (!streams.length) throw new Error(`Episode ${ep} found on AniDB.app but no playable sub/dub embed is listed for it`);
+  return streams;
+}
+
 async function fetchAniDBStreams(malId, ep) {
   const cacheKey = `${malId}/${ep}`;
   if (_anidbApiCache[cacheKey] !== undefined) return _anidbApiCache[cacheKey];
-
   try {
-    const client = await _loadAnidbClient();
-    if (!client) { _anidbApiCache[cacheKey] = null; return null; }
-
-    // anidb-client.js works with AniList IDs. We resolve via MAL→AniList mapping.
-    // Attempt to get the AniList ID from the anime-lists mapping already loaded.
-    let anilistId = null;
-    try {
-      const mapping = await loadAnimeList(); // uses Fribb anime-list-full.json
-      const entry = mapping && mapping.find(e => Number(e.mal_id) === Number(malId));
-      if (entry) anilistId = entry.anilist_id || entry.anilistId || entry.anilist || null;
-    } catch (_) {}
-
-    // Fallback: query AniList directly by MAL ID
-    if (!anilistId) {
-      try {
-        const query = `query($malId:Int){Media(idMal:$malId,type:ANIME){id}}`;
-        const res = await fetch('https://graphql.anilist.co', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query, variables: { malId: Number(malId) } })
-        });
-        if (res.ok) {
-          const d = await res.json();
-          anilistId = d?.data?.Media?.id || null;
-        }
-      } catch (_) {}
-    }
-
-    if (!anilistId) { _anidbApiCache[cacheKey] = null; return null; }
-
-    // Use handleWatch from anidb-client.js to get streams for this episode
-    const watchData = await client.handleWatch(anilistId, 'both', Number(ep));
-    const streams = (watchData?.streams || [])
-      .filter(s => s.url && s.isActive !== false)
-      .sort((a, b) => {
-        // hls before embed, dub before sub
-        if (a.type === 'hls' && b.type !== 'hls') return -1;
-        if (b.type === 'hls' && a.type !== 'hls') return 1;
-        if (a.audio === 'dub' && b.audio !== 'dub') return -1;
-        if (b.audio === 'dub' && a.audio !== 'dub') return 1;
-        return (b.priority || 0) - (a.priority || 0);
-      });
-
-    _anidbApiCache[cacheKey] = streams.length ? streams : null;
-    return _anidbApiCache[cacheKey];
+    const { anilistId } = await _resolveAnilistIdFromMal(malId);
+    const streams = await _fetchAniDBStreamsForAnilistId(anilistId, ep);
+    _anidbApiCache[cacheKey] = streams;
+    return streams;
   } catch (e) {
-    console.error('[AniDB] fetchAniDBStreams error:', e);
+    console.error('[AniDB]', e.message);
     _anidbApiCache[cacheKey] = null;
+    _anidbLastError = e.message;
     return null;
   }
 }
+
+let _anidbLastError = '';
 
 function setAniDBStatus(text, found) {
   const row = document.getElementById('anidb-status-row'); const span = document.getElementById('anidb-status-text');
@@ -1629,9 +1652,16 @@ function setAniDBStatus(text, found) {
   row.style.color = found ? 'var(--green)' : 'var(--text2)';
 }
 
+function _showAnidbManualFallback(show) {
+  const row = document.getElementById('anidb-manual-row');
+  if (row) row.style.display = show ? 'flex' : 'none';
+}
+
 async function fetchAniDBForCurrentMedia() {
   if (!playerMalId) return;
   anidbEntry = null;
+  _anidbLastError = '';
+  _showAnidbManualFallback(false);
   setAniDBStatus('Checking AniDB…', false);
   try {
     const streams = await fetchAniDBStreams(playerMalId, playerEp);
@@ -1646,12 +1676,64 @@ async function fetchAniDBForCurrentMedia() {
       document.getElementById('tab-anidb').style.opacity = '1';
       if (activeSrc === 'anidb') renderAniDBList();
     } else {
-      setAniDBStatus('Not found on AniDB API', false);
+      // Show the specific failure reason instead of a generic message
+      setAniDBStatus(`✗ ${_anidbLastError || 'Not found on AniDB'}`, false);
       document.getElementById('tab-anidb').style.opacity = '0.4';
+      _showAnidbManualFallback(true);
     }
   } catch(e) {
     console.error('AniDB fetch error:', e);
-    setAniDBStatus('AniDB lookup failed — check console', false);
+    setAniDBStatus(`✗ ${e.message || 'AniDB lookup failed'}`, false);
+    _showAnidbManualFallback(true);
+  }
+}
+
+// Manual override: mirrors the standalone AniDB player's own search box.
+// Lets the user paste an AniList ID directly, or search by title, when
+// automatic MAL→AniList resolution fails or picks the wrong match.
+async function anidbManualSearch() {
+  const inp = document.getElementById('anidb-manual-inp');
+  const statusEl = document.getElementById('anidb-manual-status');
+  const val = (inp?.value || '').trim();
+  if (!val) return;
+  statusEl.textContent = 'Searching…';
+  statusEl.style.color = 'var(--text3)';
+
+  try {
+    const client = await _loadAnidbClient();
+    let anilistId = null;
+
+    if (/^\d+$/.test(val)) {
+      anilistId = Number(val);
+    } else {
+      // Title search — same flow as the standalone AniDB player's search box
+      const results = await client.searchAniDB(val);
+      if (!results.length) throw new Error(`No AniDB.app results for "${val}"`);
+      anilistId = results[0].siteId;
+      if (!anilistId) throw new Error(`Matched "${results[0].title}" but couldn't read its ID`);
+    }
+
+    statusEl.textContent = `Found AniList ID ${anilistId} — fetching episode ${playerEp}…`;
+
+    const streams = await _fetchAniDBStreamsForAnilistId(anilistId, playerEp);
+    anidbEntry = streams;
+    _anidbApiCache[`${playerMalId}/${playerEp}`] = streams;
+
+    statusEl.textContent = '';
+    statusEl.style.color = 'var(--text3)';
+    _showAnidbManualFallback(false);
+
+    const hasDub = streams.some(s => s.audio === 'dub');
+    const hasSub = streams.some(s => s.audio === 'sub' || s.audio !== 'dub');
+    const parts = [];
+    if (hasDub) parts.push('DUB');
+    if (hasSub) parts.push('SUB');
+    setAniDBStatus(`✓ AniDB (manual) — ${parts.join(' + ')} available`, true);
+    document.getElementById('tab-anidb').style.opacity = '1';
+    if (activeSrc === 'anidb') renderAniDBList();
+  } catch (e) {
+    statusEl.textContent = `✗ ${e.message}`;
+    statusEl.style.color = '#f87171';
   }
 }
 
