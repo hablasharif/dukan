@@ -869,9 +869,8 @@ const HIANIME_BASE  = 'https://raw.githubusercontent.com/srtfile/hi_anime_stream
 const HIANIME_FILES = Array.from({length:37},(_,i)=>i===0?'hianime_streams_list.json':`hianime_streams_list_${i+1}.json`);
 const ANIMEGG_BASE  = 'https://raw.githubusercontent.com/dokkarrr/final_animgeg_embed-scraper/refs/heads/main/output/';
 const ANIMEGG_FILES = Array.from({length:20},(_,i)=>i===0?'animegg_series.json':`animegg_series${i+1}.json`);
-// AniDB API host: https://andbgithub.onrender.com (Express/Node on render.com)
-// Browser visits /21/1 and gets redirected to /#/21/1 (SPA routing) — but
-// fetch() probes dedicated API routes (/api/21/1 etc.) to get raw JSON.
+// AniDB: client-side extractor loaded from anidb-statick.onrender.com
+const ANIDB_CLIENT_BASE = 'https://anidb-statick.onrender.com';
 const ANISKIP_BASE  = 'https://api.aniskip.com/v2/skip-times';
 const ANIME_LIST_URL= 'https://raw.githubusercontent.com/Fribb/anime-lists/refs/heads/master/anime-list-full.json';
 const M4U_BASE         = 'https://raw.githubusercontent.com/ytbro8326-sudo/m4uhurlcollector-main4_seris/refs/heads/main/';
@@ -1292,80 +1291,80 @@ function getAnimeGGUrl(entry, ep, lang) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  ANIDB API LOADER
+//  ANIDB CLIENT LOADER  (https://anidb-statick.onrender.com)
+//  Uses client-side anidb-client.js — no JSON database, no
+//  server-side render.com API. All stream extraction happens
+//  in the browser via the Cloudflare Worker proxy.
 // ═══════════════════════════════════════════════════════════
-// Endpoint: https://andbgithub.onrender.com/{malId}/{ep}
-// (the "/#/21/1" you see in the address bar is just the SPA rewriting the URL
-//  client-side after the page loads — the actual data route is /{malId}/{ep})
-//
-// Why it can still fail from fetch(): the site's own page load works because it's a
-// same-origin browser navigation, but our page (hosted on a different origin) calling
-// fetch() cross-origin needs the server to send Access-Control-Allow-Origin — and this
-// render.com server does not appear to set that header. So we:
-//   1. try a direct fetch() first (works fine if CORS is actually open), then
-//   2. fall back to routing the SAME URL through our existing CORS proxy worker
-//      (the one already used for the .m3u8/embed streams), which fetches server-side
-//      and re-serves the response with permissive CORS headers.
-const ANIDB_API_BASE = 'https://andbgithub.onrender.com';
 const _anidbApiCache = {};
+let _anidbClientMod = null; // lazy-loaded ES module
 
-function anidbApiUrl(malId, ep) {
-  return `${ANIDB_API_BASE}/${malId}/${ep}`;
-}
-
-// Try a direct (no-proxy) fetch — succeeds only if the server sends CORS headers
-async function _tryDirectFetchJSON(url) {
+async function _loadAnidbClient() {
+  if (_anidbClientMod) return _anidbClientMod;
   try {
-    const r = await fetch(url, { headers: { 'Accept': 'application/json' }, mode: 'cors' });
-    if (!r.ok) return null;
-    const text = await r.text();
-    const trimmed = text.trim();
-    if (trimmed.startsWith('<')) return null; // got HTML shell, not JSON
-    return JSON.parse(trimmed);
-  } catch (_) { return null; } // CORS block / network error → caller falls back to proxy
-}
-
-// Fetch the same URL through the existing CORS proxy worker (bypasses browser CORS
-// entirely since the worker does the request server-side)
-async function _tryProxyFetchJSON(url) {
-  try {
-    const proxied = anidbProxyUrl(url); // reuses ANIDB_PROXY worker defined below in this file
-    const r = await fetch(proxied);
-    if (!r.ok) return null;
-    const text = await r.text();
-    const trimmed = text.trim();
-    if (trimmed.startsWith('<')) return null;
-    return JSON.parse(trimmed);
-  } catch (_) { return null; }
+    _anidbClientMod = await import(`${ANIDB_CLIENT_BASE}/anidb-client.js`);
+  } catch (e) {
+    console.error('[AniDB] Failed to load anidb-client.js:', e);
+    _anidbClientMod = null;
+  }
+  return _anidbClientMod;
 }
 
 async function fetchAniDBStreams(malId, ep) {
   const cacheKey = `${malId}/${ep}`;
   if (_anidbApiCache[cacheKey] !== undefined) return _anidbApiCache[cacheKey];
 
-  const url = anidbApiUrl(malId, ep);
+  try {
+    const client = await _loadAnidbClient();
+    if (!client) { _anidbApiCache[cacheKey] = null; return null; }
 
-  // 1) direct fetch first (cheap, works if CORS happens to be open)
-  let data = await _tryDirectFetchJSON(url);
-  // 2) fall back to the CORS proxy worker
-  if (!data) data = await _tryProxyFetchJSON(url);
+    // anidb-client.js works with AniList IDs. We resolve via MAL→AniList mapping.
+    // Attempt to get the AniList ID from the anime-lists mapping already loaded.
+    let anilistId = null;
+    try {
+      const mapping = await loadAnimeList(); // uses Fribb anime-list-full.json
+      const entry = mapping && mapping.find(e => Number(e.mal_id) === Number(malId));
+      if (entry) anilistId = entry.anilist_id || entry.anilistId || entry.anilist || null;
+    } catch (_) {}
 
-  if (!data || !Array.isArray(data.streams)) {
+    // Fallback: query AniList directly by MAL ID
+    if (!anilistId) {
+      try {
+        const query = `query($malId:Int){Media(idMal:$malId,type:ANIME){id}}`;
+        const res = await fetch('https://graphql.anilist.co', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, variables: { malId: Number(malId) } })
+        });
+        if (res.ok) {
+          const d = await res.json();
+          anilistId = d?.data?.Media?.id || null;
+        }
+      } catch (_) {}
+    }
+
+    if (!anilistId) { _anidbApiCache[cacheKey] = null; return null; }
+
+    // Use handleWatch from anidb-client.js to get streams for this episode
+    const watchData = await client.handleWatch(anilistId, 'both', Number(ep));
+    const streams = (watchData?.streams || [])
+      .filter(s => s.url && s.isActive !== false)
+      .sort((a, b) => {
+        // hls before embed, dub before sub
+        if (a.type === 'hls' && b.type !== 'hls') return -1;
+        if (b.type === 'hls' && a.type !== 'hls') return 1;
+        if (a.audio === 'dub' && b.audio !== 'dub') return -1;
+        if (b.audio === 'dub' && a.audio !== 'dub') return 1;
+        return (b.priority || 0) - (a.priority || 0);
+      });
+
+    _anidbApiCache[cacheKey] = streams.length ? streams : null;
+    return _anidbApiCache[cacheKey];
+  } catch (e) {
+    console.error('[AniDB] fetchAniDBStreams error:', e);
     _anidbApiCache[cacheKey] = null;
     return null;
   }
-
-  const hlsStreams = data.streams
-    .filter(s => s.type === 'hls' && s.isActive !== false && s.url)
-    .sort((a, b) => {
-      // dub always first so auto-play picks dub before sub
-      if (a.audio === 'dub' && b.audio !== 'dub') return -1;
-      if (b.audio === 'dub' && a.audio !== 'dub') return 1;
-      return (b.priority || 0) - (a.priority || 0);
-    });
-
-  _anidbApiCache[cacheKey] = hlsStreams.length ? hlsStreams : null;
-  return _anidbApiCache[cacheKey];
 }
 
 function setAniDBStatus(text, found) {
@@ -1377,33 +1376,22 @@ function setAniDBStatus(text, found) {
   row.style.color = found ? 'var(--green)' : 'var(--text2)';
 }
 
-// Tracks which malId/ep AniDB has already been fetched for, so re-clicking the
-// tab for the SAME episode doesn't re-fetch, but switching episodes does.
-let _anidbFetchedFor = null;
-
-// Called ONLY when the user clicks the AniDB tab (see switchSrc) — not automatically
-// on every episode load, to avoid unnecessary requests to a possibly-slow render.com
-// free-tier instance (cold starts).
 async function fetchAniDBForCurrentMedia() {
   if (!playerMalId) return;
-  const key = `${playerMalId}/${playerEp}`;
-  if (_anidbFetchedFor === key && anidbEntry) { renderAniDBList(); return; } // already have it
-
   anidbEntry = null;
   setAniDBStatus('Checking AniDB…', false);
-  document.getElementById('srv-loading').classList.add('show');
   try {
     const streams = await fetchAniDBStreams(playerMalId, playerEp);
-    _anidbFetchedFor = key;
     if (streams && streams.length) {
       anidbEntry = streams;
       const hasDub = streams.some(s => s.audio === 'dub');
-      const hasSub = streams.some(s => s.audio !== 'dub');
+      const hasSub = streams.some(s => s.audio === 'sub' || s.audio !== 'dub');
       const parts = [];
       if (hasDub) parts.push('DUB');
       if (hasSub) parts.push('SUB');
       setAniDBStatus(`✓ AniDB — ${parts.join(' + ')} available`, true);
       document.getElementById('tab-anidb').style.opacity = '1';
+      if (activeSrc === 'anidb') renderAniDBList();
     } else {
       setAniDBStatus('Not found on AniDB API', false);
       document.getElementById('tab-anidb').style.opacity = '0.4';
@@ -1411,9 +1399,6 @@ async function fetchAniDBForCurrentMedia() {
   } catch(e) {
     console.error('AniDB fetch error:', e);
     setAniDBStatus('AniDB lookup failed — check console', false);
-  } finally {
-    document.getElementById('srv-loading').classList.remove('show');
-    if (activeSrc === 'anidb') renderAniDBList();
   }
 }
 
@@ -1485,6 +1470,11 @@ function renderAniDBList() {
 
 function playAniDBSrv(srv) {
   if (!srv?.url) return;
+  // If this is an embed-type stream, go straight to embed player
+  if (srv._raw?.type === 'embed') {
+    playAniDBEmbed(srv.url, srv.lang);
+    return;
+  }
   ['pf-plain','pf-sb','pf-adblock'].forEach(id => {
     const f = document.getElementById(id); f.style.display = 'none'; try { f.src = 'about:blank'; } catch(_) {}
   });
@@ -1930,17 +1920,14 @@ async function loadEpisode(malId, ep, lang) {
   updateSideEpActive(ep);
   setM4UStatus('', false); document.getElementById('tab-m4u').style.opacity = '0.4';
   setAGGStatus('', false); document.getElementById('tab-agg').style.opacity = '0.4';
-  // AniDB is lazy-loaded (only fetched when the user clicks the AniDB tab) —
-  // just reset state here so a stale previous episode's data isn't shown.
   setAniDBStatus('', false); document.getElementById('tab-anidb').style.opacity = '0.4';
-  anidbEntry = null; _anidbFetchedFor = null;
   const megaSrc = `https://megaplay.buzz/stream/mal/${malId}/${ep}/${lang}?autostart=true`;
   loadIframe(megaSrc);
   serverData = [{ key: 'megaplay', label: 'MegaPlay', badge: 'MAL', url: megaSrc, source: 'anisantch', adBlock: false }];
   hianimeEntry = null; animeggEntry = null; activeServer = serverData[0];
   document.getElementById('qual-row').innerHTML = ''; document.getElementById('srv-list-inner').innerHTML = '';
   document.getElementById('srv-loading').classList.add('show');
-  const [aEntry, hiEntry] = await Promise.all([fetchACEntry(malId, ep, lang), fetchHiEntry(malId, ep), fetchSkipTimes(malId, ep), fetchM4UForCurrentMedia(), fetchAnimeGGForCurrentMedia()]);
+  const [aEntry, hiEntry] = await Promise.all([fetchACEntry(malId, ep, lang), fetchHiEntry(malId, ep), fetchSkipTimes(malId, ep), fetchM4UForCurrentMedia(), fetchAnimeGGForCurrentMedia(), fetchAniDBForCurrentMedia()]);
   document.getElementById('srv-loading').classList.remove('show');
   if (aEntry)  serverData = [serverData[0], ...buildACSrvs(aEntry)];
   if (hiEntry) hianimeEntry = hiEntry;
@@ -1948,7 +1935,7 @@ async function loadEpisode(malId, ep, lang) {
   if (activeSrc === 'hianime') renderHiList();
   else if (activeSrc === 'm4uhd') renderM4UList();
   else if (activeSrc === 'animegg') renderAnimeGGList();
-  else if (activeSrc === 'anidb') fetchAniDBForCurrentMedia(); // re-fetch for new episode since tab is currently open
+  else if (activeSrc === 'anidb') renderAniDBList();
   else renderACList();
   const activeFrame = document.getElementById('pf-plain').style.display !== 'none' ? document.getElementById('pf-plain') : document.getElementById('pf-sb');
   watchEnd(activeFrame, malId, ep, lang);
@@ -2197,7 +2184,7 @@ function switchSrc(src) {
     if (src === 'hianime') { hiRow.classList.add('show'); qRow.style.display = 'none'; renderHiList(); }
     else if (src === 'm4uhd') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderM4UList(); }
     else if (src === 'animegg') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAnimeGGList(); }
-    else if (src === 'anidb') { hiRow.classList.remove('show'); qRow.style.display = 'none'; fetchAniDBForCurrentMedia(); }
+    else if (src === 'anidb') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAniDBList(); }
     else { hiRow.classList.remove('show'); qRow.style.display = ''; renderACList(); }
   }
 }
