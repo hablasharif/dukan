@@ -799,7 +799,7 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
           <div id="hls-panel" style="display:none;flex-direction:column;gap:12px;">
             <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.06em;">📡 Advanced HLS / M3U8 Player</div>
             <div style="display:flex;gap:8px;align-items:stretch;">
-              <input id="hls-url-inp" type="text" placeholder="Paste .m3u8 / HLS link here…"
+              <input id="hls-url-inp" type="text" placeholder="Paste .m3u8, HLS, or anidb.app/embed/ link…"
                 style="flex:1;padding:9px 14px;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);font-size:12.5px;outline:none;transition:border-color .2s;"
                 onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'"
                 onkeydown="if(event.key==='Enter')playHLS()">
@@ -815,7 +815,7 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
             </div>
             <div id="hls-status" style="font-size:11px;color:var(--text3);min-height:16px;"></div>
             <div style="font-size:10.5px;color:var(--text3);line-height:1.6;background:var(--bg3);border-radius:8px;padding:8px 12px;border:1px solid var(--border);">
-              Supports HLS (.m3u8) streams. If stream requires CORS headers, set Referer/Origin above. The player renders inline using hls.js.
+              <b style="color:var(--accent2)">AniDB streams</b> (hls.anidb.app/… or anidb.app/embed/…) are automatically routed through the AniDB proxy — no extra setup needed. For all other HLS links, set Referer/Origin above if required by the source.
             </div>
           </div>
         </div>
@@ -1954,70 +1954,144 @@ function switchSrc(src) {
 // ═══════════════════════════════════════════════════════════
 let _hlsInstance = null;
 
+// ── AniDB proxy config ──────────────────────────────────────
+const ANIDB_PROXY    = 'https://old-sun-d12a.andruilsyestems.workers.dev';
+const ANIDB_REF      = 'https://anidb.app/';
+// Detects URLs that need the AniDB worker proxy
+function isAniDBStream(url) {
+  return /hls\.anidb\.app/i.test(url);
+}
+function isAniDBEmbed(url) {
+  return /anidb\.app\/embed\//i.test(url) || (/anidb\.app/i.test(url) && /\/embed\//i.test(url));
+}
+function anidbProxyUrl(rawUrl) {
+  return `${ANIDB_PROXY}/?url=${encodeURIComponent(rawUrl)}&ref=${encodeURIComponent(ANIDB_REF)}`;
+}
+// ────────────────────────────────────────────────────────────
+
 function playHLS() {
   const url = document.getElementById('hls-url-inp').value.trim();
   const referer = document.getElementById('hls-ref-inp').value.trim();
-  const origin = document.getElementById('hls-ori-inp').value.trim();
+  const origin  = document.getElementById('hls-ori-inp').value.trim();
   const statusEl = document.getElementById('hls-status');
   const ph = document.getElementById('player-ph');
 
-  if (!url) { statusEl.style.color = 'var(--orange)'; statusEl.textContent = '⚠ Please enter an HLS / M3U8 URL.'; return; }
+  if (!url) { statusEl.style.color = 'var(--orange)'; statusEl.textContent = '⚠ Please enter an HLS / M3U8 or embed URL.'; return; }
   statusEl.style.color = 'var(--text3)'; statusEl.textContent = '⏳ Loading stream…';
 
   // Destroy previous hls instance
   if (_hlsInstance) { try { _hlsInstance.destroy(); } catch (_) {} _hlsInstance = null; }
 
-  // Hide iframes, show our hls video element
-  ['pf-plain','pf-sb','pf-adblock'].forEach(id => { const f = document.getElementById(id); f.style.display = 'none'; try { f.src = 'about:blank'; } catch(_) {} });
+  // Hide all iframes & existing video
+  ['pf-plain','pf-sb','pf-adblock'].forEach(id => {
+    const f = document.getElementById(id); f.style.display = 'none'; try { f.src = 'about:blank'; } catch(_) {}
+  });
   ph.style.display = 'none';
 
+  // ── Case 1: AniDB embed URL → route through proxy inside iframe ──
+  if (isAniDBEmbed(url)) {
+    // Hide video, show hls-iframe
+    const hv = document.getElementById('hls-video-el');
+    if (hv) { hv.style.display = 'none'; try { hv.pause(); } catch(_){} }
+
+    let ifrEl = document.getElementById('hls-iframe-el');
+    if (!ifrEl) {
+      ifrEl = document.createElement('iframe');
+      ifrEl.id = 'hls-iframe-el';
+      ifrEl.allowFullscreen = true;
+      ifrEl.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture');
+      ifrEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;border:none;';
+      document.getElementById('player-main').appendChild(ifrEl);
+    }
+    ifrEl.style.display = 'block';
+    ifrEl.src = anidbProxyUrl(url);
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = '✓ AniDB embed → playing via proxy iframe';
+    return;
+  }
+
+  // Hide any proxy iframe
+  const existIfr = document.getElementById('hls-iframe-el');
+  if (existIfr) { existIfr.style.display = 'none'; existIfr.src = 'about:blank'; }
+
+  // Ensure video element exists
   let videoEl = document.getElementById('hls-video-el');
   if (!videoEl) {
     videoEl = document.createElement('video');
     videoEl.id = 'hls-video-el';
     videoEl.controls = true;
+    videoEl.crossOrigin = 'anonymous';
     videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;background:#000;';
     document.getElementById('player-main').appendChild(videoEl);
   }
   videoEl.style.display = 'block';
 
-  // Build xhrSetup for referer/origin headers
-  const xhrSetup = (xhr) => {
-    if (referer) xhr.setRequestHeader('Referer', referer);
-    if (origin) xhr.setRequestHeader('Origin', origin);
-  };
-
-  const isM3U8 = url.includes('.m3u8') || url.includes('m3u8') || url.includes('/hls/') || url.includes('playlist');
+  const isM3U8 = url.includes('.m3u8') || url.includes('/hls/') || url.includes('playlist');
+  const useAniDBProxy = isAniDBStream(url); // only for hls.anidb.app
 
   if (typeof Hls !== 'undefined' && Hls.isSupported() && isM3U8) {
-    const hls = new Hls({ xhrSetup, enableWorker: true, lowLatencyMode: false });
-    _hlsInstance = hls;
-    hls.loadSource(url);
-    hls.attachMedia(videoEl);
-    hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-      statusEl.style.color = 'var(--green)';
-      const levels = data.levels || [];
-      if (levels.length > 1) {
-        const qs = levels.map((l,i) => `${l.height || '?'}p`).join(', ');
-        statusEl.textContent = `✓ Stream loaded — ${levels.length} quality levels: ${qs}`;
-      } else {
-        statusEl.textContent = '✓ Stream loaded successfully';
-      }
-      videoEl.play().catch(() => {});
-    });
-    hls.on(Hls.Events.ERROR, (event, data) => {
-      if (data.fatal) {
-        statusEl.style.color = '#f87171'; statusEl.textContent = `✗ Stream error: ${data.type} — ${data.details}`;
-      }
-    });
+
+    // ── Case 2: AniDB HLS stream → proxy every segment request ──
+    if (useAniDBProxy) {
+      const hls = new Hls({
+        xhrSetup: (xhr, reqUrl) => {
+          // Rewrite every request (manifest + segments) through the worker
+          if (!reqUrl.startsWith(ANIDB_PROXY)) {
+            xhr.open('GET', anidbProxyUrl(reqUrl), true);
+          }
+        },
+        enableWorker: true,
+        lowLatencyMode: false
+      });
+      _hlsInstance = hls;
+      // Load the manifest through the proxy too
+      hls.loadSource(anidbProxyUrl(url));
+      hls.attachMedia(videoEl);
+      hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+        statusEl.style.color = 'var(--green)';
+        const levels = data.levels || [];
+        const qs = levels.length > 1 ? ` — ${levels.length} levels: ${levels.map(l => (l.height || '?') + 'p').join(', ')}` : '';
+        statusEl.textContent = `✓ AniDB HLS playing via proxy${qs}`;
+        videoEl.play().catch(() => {});
+      });
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) { statusEl.style.color = '#f87171'; statusEl.textContent = `✗ HLS Error: ${data.details}`; }
+      });
+
+    // ── Case 3: Generic HLS stream → use referer/origin headers if provided ──
+    } else {
+      const xhrSetup = (xhr) => {
+        if (referer) xhr.setRequestHeader('Referer', referer);
+        if (origin)  xhr.setRequestHeader('Origin', origin);
+      };
+      const hls = new Hls({ xhrSetup, enableWorker: true, lowLatencyMode: false });
+      _hlsInstance = hls;
+      hls.loadSource(url);
+      hls.attachMedia(videoEl);
+      hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+        statusEl.style.color = 'var(--green)';
+        const levels = data.levels || [];
+        if (levels.length > 1) {
+          statusEl.textContent = `✓ Stream loaded — ${levels.length} quality levels: ${levels.map(l => (l.height || '?') + 'p').join(', ')}`;
+        } else {
+          statusEl.textContent = '✓ Stream loaded successfully';
+        }
+        videoEl.play().catch(() => {});
+      });
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) { statusEl.style.color = '#f87171'; statusEl.textContent = `✗ Stream error: ${data.type} — ${data.details}`; }
+      });
+    }
+
   } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-    // Native HLS (Safari)
-    videoEl.src = url;
+    // Native HLS (Safari) — for AniDB, proxy the src
+    videoEl.src = useAniDBProxy ? anidbProxyUrl(url) : url;
     videoEl.play().catch(() => {});
-    statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Using native HLS playback';
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = useAniDBProxy ? '✓ AniDB HLS → native proxy playback' : '✓ Using native HLS playback';
   } else {
-    // Not HLS — try direct src
-    videoEl.src = url;
+    // Direct source fallback
+    videoEl.src = useAniDBProxy ? anidbProxyUrl(url) : url;
     videoEl.play().catch(() => {});
     statusEl.style.color = 'var(--text2)'; statusEl.textContent = '▶ Playing direct stream';
   }
