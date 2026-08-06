@@ -705,8 +705,44 @@ async function getGenreAnime(genreId) {
 }
 
 async function searchAnimeMAL(q) {
-  const d = await malFetch(`/anime?q=${encodeURIComponent(q)}&limit=12&fields=id,title,main_picture,mean,num_episodes,status,start_season,genres`, `/anime?q=${encodeURIComponent(q)}&limit=12`);
-  const rawList = d?.data || d?.data || [];
+  let query = q.trim();
+  if (/^https?:\/\//i.test(query)) {
+    try {
+      const u = new URL(query);
+      const parts = u.pathname.split('/').filter(Boolean);
+      query = parts.length ? parts[parts.length - 1].replace(/[-_]/g, ' ') : '';
+    } catch (_) {}
+  }
+  if (!query) return [];
+
+  try {
+    const body = JSON.stringify({
+      query: `query ($q: String) { Page(perPage: 12) { media(search: $q, type: ANIME) { id idMal title { english romaji } coverImage { medium large } meanScore episodes status seasonYear } } }`,
+      variables: { q: query }
+    });
+    const r = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body
+    });
+    if (r.ok) {
+      const data = await r.json();
+      const media = data?.data?.Page?.media || [];
+      if (media.length) {
+        return media.map(m => ({
+          mal_id: m.idMal || m.id, id: m.idMal || m.id,
+          title: m.title?.english || m.title?.romaji || 'Untitled',
+          title_english: m.title?.english || m.title?.romaji || 'Untitled',
+          images: { jpg: { image_url: m.coverImage?.medium || m.coverImage?.large, small_image_url: m.coverImage?.medium || m.coverImage?.large, large_image_url: m.coverImage?.large || m.coverImage?.medium } },
+          score: m.meanScore ? (m.meanScore / 10).toFixed(1) : null,
+          type: 'TV', episodes: m.episodes || null, status: m.status || 'Finished Airing', year: m.seasonYear || '', synopsis: '', genres: []
+        }));
+      }
+    }
+  } catch (e) {}
+
+  const d = await malFetch(`/anime?q=${encodeURIComponent(query)}&limit=12&fields=id,title,main_picture,mean,num_episodes,status,start_season,genres`, `/anime?q=${encodeURIComponent(query)}&limit=12`);
+  const rawList = d?.data || [];
   return rawList.map(normalizeAnime).filter(Boolean);
 }
 
@@ -1203,7 +1239,16 @@ searchInp.addEventListener('input', () => {
   clearTimeout(debounceT);
   const q = searchInp.value.trim();
   if (!q) { searchDD.classList.remove('show'); return; }
-  debounceT = setTimeout(() => doSearch(q), 350);
+  debounceT = setTimeout(() => doSearch(q), 300);
+});
+
+searchInp.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    clearTimeout(debounceT);
+    const q = searchInp.value.trim();
+    if (q) doSearch(q);
+  }
 });
 
 searchInp.addEventListener('focus', () => {
