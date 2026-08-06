@@ -1298,15 +1298,43 @@ const _anidbApiCache = {};
 async function fetchAniDBStreams(malId, ep) {
   const cacheKey = `${malId}/${ep}`;
   if (_anidbApiCache[cacheKey] !== undefined) return _anidbApiCache[cacheKey];
-  try {
-    const r = await fetch(`${ANIDB_API_BASE}/#/${malId}/${ep}`);
-    if (!r.ok) { _anidbApiCache[cacheKey] = null; return null; }
-    const data = await r.json();
-    // Keep only active HLS streams
-    const hlsStreams = (data.streams || []).filter(s => s.type === 'hls' && s.isActive !== false && s.url);
-    _anidbApiCache[cacheKey] = hlsStreams.length ? hlsStreams : null;
-    return _anidbApiCache[cacheKey];
-  } catch { _anidbApiCache[cacheKey] = null; return null; }
+
+  // The API endpoint is path-based: /malId/ep
+  // NOTE: The old URL used #/malId/ep — the # (fragment) is NEVER sent to the server,
+  // so the server only received GET / and returned its HTML homepage instead of JSON.
+  // Correct form: https://andbgithub.onrender.com/21/5
+  const urls = [
+    `${ANIDB_API_BASE}/${malId}/${ep}`,
+    `${ANIDB_API_BASE}/api/${malId}/${ep}`,
+    `${ANIDB_API_BASE}/?malId=${malId}&ep=${ep}`,
+  ];
+
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, {
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!r.ok) continue;
+      const contentType = r.headers.get('content-type') || '';
+      // If the server returned HTML (e.g. its SPA shell), skip — that URL isn't the API
+      if (!contentType.includes('application/json') && !contentType.includes('text/json')) continue;
+      const data = await r.json();
+      // Keep only active HLS streams; prefer dub first in the returned order
+      const hlsStreams = (data.streams || [])
+        .filter(s => s.type === 'hls' && s.isActive !== false && s.url)
+        .sort((a, b) => {
+          // dub before sub so auto-play picks dub first
+          if (a.audio === 'dub' && b.audio !== 'dub') return -1;
+          if (b.audio === 'dub' && a.audio !== 'dub') return 1;
+          return (b.priority || 0) - (a.priority || 0);
+        });
+      _anidbApiCache[cacheKey] = hlsStreams.length ? hlsStreams : null;
+      return _anidbApiCache[cacheKey];
+    } catch (_) { /* try next */ }
+  }
+
+  _anidbApiCache[cacheKey] = null;
+  return null;
 }
 
 function setAniDBStatus(text, found) {
@@ -1324,16 +1352,24 @@ async function fetchAniDBForCurrentMedia() {
   setAniDBStatus('Checking AniDB…', false);
   try {
     const streams = await fetchAniDBStreams(playerMalId, playerEp);
-    if (streams) {
+    if (streams && streams.length) {
       anidbEntry = streams;
-      setAniDBStatus(`✓ AniDB — ${streams.length} stream${streams.length > 1 ? 's' : ''} found`, true);
+      const hasDub = streams.some(s => s.audio === 'dub');
+      const hasSub = streams.some(s => s.audio === 'sub' || s.audio !== 'dub');
+      const parts = [];
+      if (hasDub) parts.push('DUB');
+      if (hasSub) parts.push('SUB');
+      setAniDBStatus(`✓ AniDB — ${parts.join(' + ')} available`, true);
       document.getElementById('tab-anidb').style.opacity = '1';
       if (activeSrc === 'anidb') renderAniDBList();
     } else {
       setAniDBStatus('Not found on AniDB API', false);
       document.getElementById('tab-anidb').style.opacity = '0.4';
     }
-  } catch(e) { setAniDBStatus('AniDB lookup failed', false); }
+  } catch(e) {
+    console.error('AniDB fetch error:', e);
+    setAniDBStatus('AniDB lookup failed — check console', false);
+  }
 }
 
 function renderAniDBList() {
@@ -1347,19 +1383,37 @@ function renderAniDBList() {
     return;
   }
 
-  const isDubPref = playerLang === 'dub';
+  // Always sort: dub first (auto-play dub; if no dub, fall back to sub)
+  // The API audio field is "dub" or "sub"; language field is e.g. "eng"/"jpn"
   const sorted = [...anidbEntry].sort((a, b) => {
-    const aD = a.audio === 'dub', bD = b.audio === 'dub';
-    return isDubPref ? (bD ? 1 : 0) - (aD ? 1 : 0) : (bD ? 0 : 1) - (aD ? 0 : 1);
+    if (a.audio === 'dub' && b.audio !== 'dub') return -1;
+    if (b.audio === 'dub' && a.audio !== 'dub') return 1;
+    return (b.priority || 0) - (a.priority || 0);
   });
+
+  const dubStream = sorted.find(s => s.audio === 'dub');
+  const subStream = sorted.find(s => s.audio === 'sub' || s.audio !== 'dub');
+  // Auto-play: dub if available, else sub
+  const autoPlay = dubStream || subStream;
 
   sorted.forEach((s, i) => {
     const isDub = s.audio === 'dub';
-    const lang = s.language ? s.language.toUpperCase() : (isDub ? 'ENG' : 'JPN');
-    const srv = { key: `anidb_${i}_${s.audio}`, label: isDub ? 'AniDB DUB' : 'AniDB SUB', badge: 'AniDB', url: s.url, source: 'anidb', lang: s.audio, _raw: s };
+    // language field may be "eng", "jpn", "eng,jpn" — show cleanly
+    const langRaw = s.language || (isDub ? 'eng' : 'jpn');
+    const langLabel = langRaw.split(',').map(l => l.trim().toUpperCase()).join('/');
+    const srv = {
+      key: `anidb_${i}_${s.audio}`,
+      label: isDub ? '🟠 AniDB DUB' : '🔵 AniDB SUB',
+      badge: 'AniDB',
+      url: s.url,
+      source: 'anidb',
+      lang: s.audio,
+      _raw: s
+    };
+    const isDefault = autoPlay && s === autoPlay;
     const btn = document.createElement('button');
-    btn.className = 'srv-item adb' + (i === 0 ? ' active' : '');
-    btn.innerHTML = `<span>${isDub ? 'AniDB DUB' : 'AniDB SUB'}</span><span class="srv-badge-sm" style="background:${isDub ? 'var(--orange)' : 'var(--teal)'};color:#000">${lang}</span>`;
+    btn.className = 'srv-item adb' + (isDefault ? ' active' : '');
+    btn.innerHTML = `<span>${isDub ? 'AniDB DUB' : 'AniDB SUB'}</span><span class="srv-badge-sm" style="background:${isDub ? 'var(--orange)' : 'var(--teal)' };color:#000;font-weight:800">${langLabel}</span>`;
     btn.onclick = () => {
       document.querySelectorAll('.srv-item').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
@@ -1367,11 +1421,20 @@ function renderAniDBList() {
       playAniDBSrv(srv);
     };
     list.appendChild(btn);
-    if (i === 0) activeServer = srv;
+    if (isDefault) activeServer = srv;
   });
 
-  if (sorted[0]) {
-    playAniDBSrv({ key: `anidb_0_${sorted[0].audio}`, label: sorted[0].audio === 'dub' ? 'AniDB DUB' : 'AniDB SUB', url: sorted[0].url, source: 'anidb', lang: sorted[0].audio, _raw: sorted[0] });
+  // Auto-play dub first; if no dub stream exists, auto-play sub
+  if (autoPlay) {
+    const idx = sorted.indexOf(autoPlay);
+    playAniDBSrv({
+      key: `anidb_${idx}_${autoPlay.audio}`,
+      label: autoPlay.audio === 'dub' ? 'AniDB DUB' : 'AniDB SUB',
+      url: autoPlay.url,
+      source: 'anidb',
+      lang: autoPlay.audio,
+      _raw: autoPlay
+    });
   }
 }
 
@@ -1388,6 +1451,7 @@ function playAniDBSrv(srv) {
     videoEl.id = 'hls-video-el';
     videoEl.controls = true;
     videoEl.crossOrigin = 'anonymous';
+    videoEl.autoplay = true;
     videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;background:#000;';
     document.getElementById('player-main').appendChild(videoEl);
   }
@@ -1398,20 +1462,33 @@ function playAniDBSrv(srv) {
   if (existIfr) { existIfr.style.display = 'none'; try { existIfr.src = 'about:blank'; } catch(_) {} }
 
   const isDub = srv.lang === 'dub';
+  // Use the referer from the raw stream object (API returns "referer":"https://anidb.app/")
+  const streamRef = srv._raw?.referer || ANIDB_REF;
   setAniDBStatus(`⏳ Loading ${isDub ? 'DUB' : 'SUB'} stream via proxy…`, false);
+
+  // Build proxy URL that includes the correct referer for this specific stream
+  const proxyUrlFor = (rawUrl) =>
+    `${ANIDB_PROXY}/?url=${encodeURIComponent(rawUrl)}&ref=${encodeURIComponent(streamRef)}`;
 
   ensureHlsJS(() => {
     if (typeof Hls !== 'undefined' && Hls.isSupported()) {
       const hls = new Hls({
         xhrSetup: (xhr, reqUrl) => {
+          // Route ALL requests (manifest + every segment) through the proxy
           if (!reqUrl.startsWith(ANIDB_PROXY)) {
-            xhr.open('GET', anidbProxyUrl(reqUrl), true);
+            xhr.open('GET', proxyUrlFor(reqUrl), true);
           }
         },
-        enableWorker: true
+        enableWorker: true,
+        lowLatencyMode: false,
+        // Increase retry tolerance — render.com cold starts can be slow
+        manifestLoadingTimeOut: 20000,
+        manifestLoadingMaxRetry: 3,
+        levelLoadingTimeOut: 20000,
+        fragLoadingTimeOut: 30000,
       });
       _hlsInstance = hls;
-      hls.loadSource(anidbProxyUrl(srv.url));
+      hls.loadSource(proxyUrlFor(srv.url));
       hls.attachMedia(videoEl);
       hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
         const levels = data.levels || [];
@@ -1422,16 +1499,21 @@ function playAniDBSrv(srv) {
       });
       hls.on(Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
-          setAniDBStatus(`✗ Error: ${data.details} — trying embed fallback`, false);
+          setAniDBStatus(`✗ Proxy error (${data.details}) — trying embed fallback…`, false);
+          hls.destroy(); _hlsInstance = null;
           const embedUrl = srv._raw?.embed;
           if (embedUrl) playAniDBEmbed(embedUrl, srv.lang);
+          else setAniDBStatus(`✗ Stream failed: ${data.details}`, false);
         }
       });
     } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-      videoEl.src = anidbProxyUrl(srv.url);
+      // Safari native HLS — proxy the src URL
+      videoEl.src = proxyUrlFor(srv.url);
       videoEl.play().catch(() => {});
-      setAniDBStatus(`✓ Playing ${isDub ? 'DUB' : 'SUB'} (native HLS)`, true);
+      setAniDBStatus(`✓ Playing ${isDub ? 'DUB' : 'SUB'} (native HLS via proxy)`, true);
+      watchEnd(videoEl, playerMalId, playerEp, playerLang);
     } else {
+      // HLS.js not supported and not Safari — try embed fallback
       const embedUrl = srv._raw?.embed;
       if (embedUrl) playAniDBEmbed(embedUrl, srv.lang);
       else setAniDBStatus('✗ HLS not supported in this browser', false);
