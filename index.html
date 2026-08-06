@@ -869,7 +869,7 @@ const HIANIME_BASE  = 'https://raw.githubusercontent.com/srtfile/hi_anime_stream
 const HIANIME_FILES = Array.from({length:37},(_,i)=>i===0?'hianime_streams_list.json':`hianime_streams_list_${i+1}.json`);
 const ANIMEGG_BASE  = 'https://raw.githubusercontent.com/dokkarrr/final_animgeg_embed-scraper/refs/heads/main/output/';
 const ANIMEGG_FILES = Array.from({length:20},(_,i)=>i===0?'animegg_series.json':`animegg_series${i+1}.json`);
-const ANIDB_URL     = 'https://raw.githubusercontent.com/ytbro8326-sudo/anidb_stream_urls/refs/heads/main/anidb_embeds_batch.json';
+// ANIDB_URL removed — now using live API: https://andbgithub.onrender.com/#/{malId}/{ep}
 const ANISKIP_BASE  = 'https://api.aniskip.com/v2/skip-times';
 const ANIME_LIST_URL= 'https://raw.githubusercontent.com/Fribb/anime-lists/refs/heads/master/anime-list-full.json';
 const M4U_BASE         = 'https://raw.githubusercontent.com/ytbro8326-sudo/m4uhurlcollector-main4_seris/refs/heads/main/';
@@ -923,8 +923,7 @@ let animeggEntry    = null;
 let _animeggCache   = null;
 let _animeggProm    = null;
 let anidbEntry      = null;
-let _anidbCache     = null;
-let _anidbProm      = null;
+// _anidbCache/_anidbProm removed — per-episode cache now in _anidbApiCache (inside fetchAniDBStreams)
 let skipTimes       = { op: null, ed: null };
 let skipFakeTime    = 0;
 let skipFakeTimer   = null;
@@ -1291,17 +1290,25 @@ function getAnimeGGUrl(entry, ep, lang) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  ANIDB DATA LOADER
+//  ANIDB API LOADER  (https://andbgithub.onrender.com/#/{malId}/{ep})
 // ═══════════════════════════════════════════════════════════
-async function loadAniDB() {
-  if (_anidbCache) return _anidbCache; if (_anidbProm) return _anidbProm;
-  _anidbProm = fetch(ANIDB_URL).then(r => r.ok ? r.json() : []).catch(() => []).then(data => { _anidbCache = Array.isArray(data) ? data : []; _anidbProm = null; return _anidbCache; });
-  return _anidbProm;
+const ANIDB_API_BASE = 'https://andbgithub.onrender.com';
+const _anidbApiCache = {};
+
+async function fetchAniDBStreams(malId, ep) {
+  const cacheKey = `${malId}/${ep}`;
+  if (_anidbApiCache[cacheKey] !== undefined) return _anidbApiCache[cacheKey];
+  try {
+    const r = await fetch(`${ANIDB_API_BASE}/#/${malId}/${ep}`);
+    if (!r.ok) { _anidbApiCache[cacheKey] = null; return null; }
+    const data = await r.json();
+    // Keep only active HLS streams
+    const hlsStreams = (data.streams || []).filter(s => s.type === 'hls' && s.isActive !== false && s.url);
+    _anidbApiCache[cacheKey] = hlsStreams.length ? hlsStreams : null;
+    return _anidbApiCache[cacheKey];
+  } catch { _anidbApiCache[cacheKey] = null; return null; }
 }
-async function fetchAniDBEntry(malId) {
-  if (!malId) return null; const mid = String(parseInt(malId, 10)); const all = await loadAniDB();
-  return all.find(e => { if (!e.mal) return false; const m = e.mal.match(/\/anime\/(\d+)/); return m && m[1] === mid; }) || null;
-}
+
 function setAniDBStatus(text, found) {
   const row = document.getElementById('anidb-status-row'); const span = document.getElementById('anidb-status-text');
   if (!text) { row.classList.remove('show'); return; }
@@ -1310,28 +1317,144 @@ function setAniDBStatus(text, found) {
   row.style.borderColor = found ? 'rgba(52,211,153,.25)' : 'rgba(155,155,180,.25)';
   row.style.color = found ? 'var(--green)' : 'var(--text2)';
 }
+
 async function fetchAniDBForCurrentMedia() {
-  if (!playerMalId) return; anidbEntry = null; setAniDBStatus('Checking AniDB library…', false);
-  try { const entry = await fetchAniDBEntry(playerMalId); anidbEntry = entry; if (entry) { setAniDBStatus(`✓ Found: Serial #${entry.serial_no}`, true); document.getElementById('tab-anidb').style.opacity = '1'; if (activeSrc === 'anidb') renderAniDBList(); } else setAniDBStatus('Not in AniDB batch library', false); } catch(e) { setAniDBStatus('AniDB lookup failed', false); }
+  if (!playerMalId) return;
+  anidbEntry = null;
+  setAniDBStatus('Checking AniDB…', false);
+  try {
+    const streams = await fetchAniDBStreams(playerMalId, playerEp);
+    if (streams) {
+      anidbEntry = streams;
+      setAniDBStatus(`✓ AniDB — ${streams.length} stream${streams.length > 1 ? 's' : ''} found`, true);
+      document.getElementById('tab-anidb').style.opacity = '1';
+      if (activeSrc === 'anidb') renderAniDBList();
+    } else {
+      setAniDBStatus('Not found on AniDB API', false);
+      document.getElementById('tab-anidb').style.opacity = '0.4';
+    }
+  } catch(e) { setAniDBStatus('AniDB lookup failed', false); }
 }
+
 function renderAniDBList() {
   const list = document.getElementById('srv-list-inner'); const qRow = document.getElementById('qual-row');
   qRow.innerHTML = ''; qRow.style.display = 'none'; list.innerHTML = '';
-  document.getElementById('hi-subsrc-row').classList.remove('show'); document.getElementById('srv-loading').classList.remove('show');
-  if (!anidbEntry) { list.innerHTML = '<div style="grid-column:1/-1;font-size:12px;color:var(--text2);padding:8px 0;line-height:1.6">No AniDB streams for this title.<br><span style="font-size:11px;color:var(--text3)">Try AnisantCH or HiAnime.</span></div>'; return; }
-  const epN = parseInt(playerEp, 10); const prefer = playerLang;
-  const keys = prefer === 'sub' ? [`embed_sub_ep_${epN}`, `embed_dub_ep_${epN}`] : [`embed_dub_ep_${epN}`, `embed_sub_ep_${epN}`];
-  const srvs = [];
-  keys.forEach(k => { if (anidbEntry[k]) { const isDub = k.includes('_dub_'); srvs.push({ key: `anidb_${k}`, label: isDub ? 'AniDB DUB' : 'AniDB SUB', badge: 'AniDB', url: anidbEntry[k], source: 'anidb', lang: isDub ? 'dub' : 'sub' }); } });
-  if (!srvs.length) { list.innerHTML = `<div style="grid-column:1/-1;font-size:12px;color:var(--text2);padding:6px 0">No AniDB streams for Episode ${epN}.</div>`; return; }
-  srvs.forEach((srv, i) => { const btn = document.createElement('button'); btn.className = 'srv-item adb' + (i === 0 ? ' active' : ''); btn.innerHTML = `<span>${srv.label}</span><span class="srv-badge-sm">AniDB</span>`; btn.onclick = () => { document.querySelectorAll('.srv-item').forEach(b => b.classList.remove('active')); btn.classList.add('active'); activeServer = srv; prefSrvKey = srv.key; playAniDBSrv(srv); }; list.appendChild(btn); if (i === 0) activeServer = srv; });
-  if (srvs[0]) playAniDBSrv(srvs[0]);
+  document.getElementById('hi-subsrc-row').classList.remove('show');
+  document.getElementById('srv-loading').style.display = 'none';
+
+  if (!anidbEntry || !anidbEntry.length) {
+    list.innerHTML = '<div style="grid-column:1/-1;font-size:12px;color:var(--text2);padding:8px 0;line-height:1.6">No AniDB streams for this episode.<br><span style="font-size:11px;color:var(--text3)">Try AnisantCH or HiAnime.</span></div>';
+    return;
+  }
+
+  const isDubPref = playerLang === 'dub';
+  const sorted = [...anidbEntry].sort((a, b) => {
+    const aD = a.audio === 'dub', bD = b.audio === 'dub';
+    return isDubPref ? (bD ? 1 : 0) - (aD ? 1 : 0) : (bD ? 0 : 1) - (aD ? 0 : 1);
+  });
+
+  sorted.forEach((s, i) => {
+    const isDub = s.audio === 'dub';
+    const lang = s.language ? s.language.toUpperCase() : (isDub ? 'ENG' : 'JPN');
+    const srv = { key: `anidb_${i}_${s.audio}`, label: isDub ? 'AniDB DUB' : 'AniDB SUB', badge: 'AniDB', url: s.url, source: 'anidb', lang: s.audio, _raw: s };
+    const btn = document.createElement('button');
+    btn.className = 'srv-item adb' + (i === 0 ? ' active' : '');
+    btn.innerHTML = `<span>${isDub ? 'AniDB DUB' : 'AniDB SUB'}</span><span class="srv-badge-sm" style="background:${isDub ? 'var(--orange)' : 'var(--teal)'};color:#000">${lang}</span>`;
+    btn.onclick = () => {
+      document.querySelectorAll('.srv-item').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeServer = srv; prefSrvKey = srv.key;
+      playAniDBSrv(srv);
+    };
+    list.appendChild(btn);
+    if (i === 0) activeServer = srv;
+  });
+
+  if (sorted[0]) {
+    playAniDBSrv({ key: `anidb_0_${sorted[0].audio}`, label: sorted[0].audio === 'dub' ? 'AniDB DUB' : 'AniDB SUB', url: sorted[0].url, source: 'anidb', lang: sorted[0].audio, _raw: sorted[0] });
+  }
 }
+
 function playAniDBSrv(srv) {
   if (!srv?.url) return;
-  ['pf-plain','pf-sb','pf-adblock'].forEach(id => { const f = document.getElementById(id); f.style.display = 'none'; f.src = 'about:blank'; });
-  const ph = document.getElementById('player-ph'); ph.style.display = 'flex';
-  ph.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:14px;padding:24px;text-align:center;max-width:320px"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><polyline points="8 21 12 17 16 21"/></svg><div style="font-size:15px;font-weight:700;color:var(--text)">AniDB Stream</div><div style="font-size:12px;color:var(--text2);line-height:1.6">AniDB embeds block direct framing.<br>Click below to open stream in a new tab.</div><a href="${srv.url}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:10px;background:var(--accent);color:#fff;font-size:14px;font-weight:700;text-decoration:none;">Open Stream</a><div style="font-size:11px;color:var(--text3)">${srv.lang?.toUpperCase() || ''} · Episode ${playerEp}</div></div>`;
+  ['pf-plain','pf-sb','pf-adblock'].forEach(id => {
+    const f = document.getElementById(id); f.style.display = 'none'; try { f.src = 'about:blank'; } catch(_) {}
+  });
+  if (_hlsInstance) { try { _hlsInstance.destroy(); } catch (_) {} _hlsInstance = null; }
+
+  let videoEl = document.getElementById('hls-video-el');
+  if (!videoEl) {
+    videoEl = document.createElement('video');
+    videoEl.id = 'hls-video-el';
+    videoEl.controls = true;
+    videoEl.crossOrigin = 'anonymous';
+    videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;background:#000;';
+    document.getElementById('player-main').appendChild(videoEl);
+  }
+  videoEl.style.display = 'block';
+  document.getElementById('player-ph').style.display = 'none';
+
+  const existIfr = document.getElementById('hls-iframe-el');
+  if (existIfr) { existIfr.style.display = 'none'; try { existIfr.src = 'about:blank'; } catch(_) {} }
+
+  const isDub = srv.lang === 'dub';
+  setAniDBStatus(`⏳ Loading ${isDub ? 'DUB' : 'SUB'} stream via proxy…`, false);
+
+  ensureHlsJS(() => {
+    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+      const hls = new Hls({
+        xhrSetup: (xhr, reqUrl) => {
+          if (!reqUrl.startsWith(ANIDB_PROXY)) {
+            xhr.open('GET', anidbProxyUrl(reqUrl), true);
+          }
+        },
+        enableWorker: true
+      });
+      _hlsInstance = hls;
+      hls.loadSource(anidbProxyUrl(srv.url));
+      hls.attachMedia(videoEl);
+      hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+        const levels = data.levels || [];
+        const qs = levels.length > 1 ? ` · ${levels.map(l => (l.height || '?') + 'p').join('/')}` : '';
+        setAniDBStatus(`✓ Playing ${isDub ? 'DUB' : 'SUB'}${qs}`, true);
+        videoEl.play().catch(() => {});
+        watchEnd(videoEl, playerMalId, playerEp, playerLang);
+      });
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          setAniDBStatus(`✗ Error: ${data.details} — trying embed fallback`, false);
+          const embedUrl = srv._raw?.embed;
+          if (embedUrl) playAniDBEmbed(embedUrl, srv.lang);
+        }
+      });
+    } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+      videoEl.src = anidbProxyUrl(srv.url);
+      videoEl.play().catch(() => {});
+      setAniDBStatus(`✓ Playing ${isDub ? 'DUB' : 'SUB'} (native HLS)`, true);
+    } else {
+      const embedUrl = srv._raw?.embed;
+      if (embedUrl) playAniDBEmbed(embedUrl, srv.lang);
+      else setAniDBStatus('✗ HLS not supported in this browser', false);
+    }
+  });
+}
+
+function playAniDBEmbed(embedUrl, lang) {
+  const hv = document.getElementById('hls-video-el');
+  if (hv) { hv.style.display = 'none'; try { hv.pause(); } catch(_){} }
+  let ifrEl = document.getElementById('hls-iframe-el');
+  if (!ifrEl) {
+    ifrEl = document.createElement('iframe');
+    ifrEl.id = 'hls-iframe-el';
+    ifrEl.allowFullscreen = true;
+    ifrEl.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture');
+    ifrEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;border:none;';
+    document.getElementById('player-main').appendChild(ifrEl);
+  }
+  ifrEl.style.display = 'block';
+  ifrEl.src = anidbProxyUrl(embedUrl);
+  document.getElementById('player-ph').style.display = 'none';
+  setAniDBStatus(`✓ Playing embed ${lang ? lang.toUpperCase() : ''} via proxy`, true);
 }
 
 // ═══════════════════════════════════════════════════════════
