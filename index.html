@@ -300,6 +300,46 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
 #an-play { background: var(--accent); color: #fff; }
 #an-cancel { background: var(--bg4); color: var(--text); }
 
+/* ── GEAR / QUALITY BUTTON OVERLAY ── */
+#gear-btn {
+  position: absolute; bottom: 60px; right: 14px; z-index: 15;
+  width: 34px; height: 34px; border-radius: 8px;
+  background: rgba(0,0,0,.72); backdrop-filter: blur(6px);
+  border: 1px solid rgba(255,255,255,.15); color: #fff;
+  cursor: pointer; display: none; align-items: center; justify-content: center;
+  transition: background .2s, border-color .2s;
+}
+#gear-btn.visible { display: flex; }
+#gear-btn:hover { background: rgba(108,99,255,.7); border-color: var(--accent); }
+#gear-btn svg { pointer-events: none; }
+
+#gear-menu {
+  position: absolute; bottom: 102px; right: 14px; z-index: 16;
+  background: rgba(13,13,24,.96); backdrop-filter: blur(12px);
+  border: 1px solid var(--border2); border-radius: 12px;
+  padding: 8px; display: none; flex-direction: column; gap: 4px; min-width: 140px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.7);
+}
+#gear-menu.open { display: flex; }
+.gear-menu-title {
+  font-size: 10px; font-weight: 700; color: var(--text3);
+  text-transform: uppercase; letter-spacing: .07em;
+  padding: 4px 8px 6px; border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+.gear-q-btn {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 10px; border-radius: 7px; border: none;
+  background: transparent; color: var(--text); font-size: 12px; font-weight: 600;
+  cursor: pointer; transition: background .15s, color .15s;
+  text-align: left; width: 100%;
+}
+.gear-q-btn:hover { background: var(--bg4); }
+.gear-q-btn.active { background: rgba(108,99,255,.2); color: var(--accent2); }
+.gear-q-btn.unavail { opacity: .38; cursor: not-allowed; }
+.gear-q-badge { font-size: 9px; font-weight: 800; padding: 1px 5px; border-radius: 4px; background: var(--bg4); color: var(--text3); }
+.gear-q-btn.active .gear-q-badge { background: var(--accent); color: #fff; }
+
 /* ── SERVER SECTION (below video, inside left scroll) ── */
 #player-server-section {
   padding: 20px 24px 32px; background: var(--bg2); border-top: 1px solid var(--border);
@@ -689,6 +729,17 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
           <iframe id="pf-plain" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="origin" style="display:none"></iframe>
           <iframe id="pf-sb" sandbox="allow-scripts allow-same-origin allow-presentation allow-forms" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="no-referrer" style="display:none"></iframe>
           <iframe id="pf-adblock" sandbox="allow-scripts allow-same-origin allow-presentation allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="no-referrer" style="display:none"></iframe>
+          <!-- Gear / Quality selector overlay (AllanimeHD only) -->
+          <button id="gear-btn" title="Quality Settings" onclick="toggleGearMenu(event)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+          <div id="gear-menu">
+            <div class="gear-menu-title">Quality</div>
+            <!-- populated by JS -->
+          </div>
+
           <div id="skip-bar">
             <button class="skip-btn" id="skip-op-btn" onclick="skipIntro()" style="display:none">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="5 4 15 12 5 20"/><line x1="19" y1="4" x2="19" y2="20"/></svg>
@@ -724,6 +775,7 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
             <button class="src-t"        id="tab-agg"   onclick="switchSrc('animegg')">🥚 AnimeGG</button>
             <button class="src-t"        id="tab-anidb" onclick="switchSrc('anidb')">📺 AniDB</button>
             <button class="src-t"        id="tab-m4u"   onclick="switchSrc('m4uhd')">🎬 M4UHD</button>
+            <button class="src-t"        id="tab-hls"   onclick="switchSrc('hlsplayer')">📡 HLS Player</button>
           </div>
           <div id="m4u-status-row"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span id="m4u-status-text">Checking M4UHD library…</span></div>
           <div id="agg-status-row"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span id="agg-status-text">Checking AnimeGG library…</span></div>
@@ -741,6 +793,30 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
           <div id="skip-info-row">
             <div class="skip-info-title">⏭ Skip Times (AniSkip)</div>
             <div id="skip-info-inner"></div>
+          </div>
+
+          <!-- HLS / M3U8 Player Panel -->
+          <div id="hls-panel" style="display:none;flex-direction:column;gap:12px;">
+            <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.06em;">📡 Advanced HLS / M3U8 Player</div>
+            <div style="display:flex;gap:8px;align-items:stretch;">
+              <input id="hls-url-inp" type="text" placeholder="Paste .m3u8 / HLS link here…"
+                style="flex:1;padding:9px 14px;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);font-size:12.5px;outline:none;transition:border-color .2s;"
+                onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'"
+                onkeydown="if(event.key==='Enter')playHLS()">
+              <button onclick="playHLS()" style="padding:9px 16px;border-radius:9px;border:none;background:var(--accent);color:#fff;font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0;white-space:nowrap;">▶ Play</button>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <input id="hls-ref-inp" type="text" placeholder="Referer (optional)"
+                style="flex:1;min-width:140px;padding:7px 12px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--text2);font-size:11.5px;outline:none;"
+                onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'">
+              <input id="hls-ori-inp" type="text" placeholder="Origin (optional)"
+                style="flex:1;min-width:140px;padding:7px 12px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--text2);font-size:11.5px;outline:none;"
+                onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'">
+            </div>
+            <div id="hls-status" style="font-size:11px;color:var(--text3);min-height:16px;"></div>
+            <div style="font-size:10.5px;color:var(--text3);line-height:1.6;background:var(--bg3);border-radius:8px;padding:8px 12px;border:1px solid var(--border);">
+              Supports HLS (.m3u8) streams. If stream requires CORS headers, set Referer/Origin above. The player renders inline using hls.js.
+            </div>
           </div>
         </div>
       </div><!-- /player-left -->
@@ -933,25 +1009,47 @@ async function getAnimeDetailsMAL(malId) {
   if (!d) return null; return normalizeAnime(d.data || d);
 }
 
-// Fetch related/sequel anime via Jikan
+// Fetch related/sequel anime via Jikan — includes full info (images, score, episodes)
 async function getRelatedAnime(malId) {
   try {
     const r = await fetch(`${JIKAN_BASE}/anime/${malId}/relations`);
     if (!r.ok) return [];
     const data = await r.json();
     const entries = data?.data || [];
-    const sequels = [];
+    const stubs = [];
     for (const rel of entries) {
       const relType = rel.relation?.toLowerCase() || '';
       if (['sequel', 'prequel', 'alternative version', 'side story', 'spin-off', 'parent story'].includes(relType)) {
         for (const e of (rel.entry || [])) {
           if (e.type === 'anime') {
-            sequels.push({ ...e, relation: rel.relation });
+            stubs.push({ ...e, relation: rel.relation });
           }
         }
       }
     }
-    return sequels;
+    if (!stubs.length) return [];
+    // Fetch full info (images, score, episodes) for each stub
+    const full = [];
+    for (const stub of stubs.slice(0, 8)) {
+      try {
+        await new Promise(res => setTimeout(res, 250)); // respect Jikan rate-limit
+        const ri = await fetch(`${JIKAN_BASE}/anime/${stub.mal_id}`);
+        if (ri.ok) {
+          const di = await ri.json();
+          if (di.data) {
+            full.push({ ...normalizeAnime(di.data), relation: stub.relation });
+          } else {
+            // fallback: use stub with placeholder image
+            full.push({ ...stub, images: stub.images || { jpg: { image_url: '', large_image_url: '' } } });
+          }
+        } else {
+          full.push({ ...stub, images: stub.images || { jpg: { image_url: '', large_image_url: '' } } });
+        }
+      } catch {
+        full.push({ ...stub, images: stub.images || { jpg: { image_url: '', large_image_url: '' } } });
+      }
+    }
+    return full;
   } catch { return []; }
 }
 
@@ -1697,10 +1795,67 @@ function renderHiList() {
 }
 function setHiSS(ss) { activeHiSS = ss; document.querySelectorAll('.subsrc-pill').forEach(p => p.classList.toggle('active', p.dataset.ss === ss)); renderHiList(); }
 
+// ═══════════════════════════════════════════════════════════
+//  GEAR MENU (in-player resolution picker for AllanimeHD)
+// ═══════════════════════════════════════════════════════════
+let _gearEntry = null; // current allanime entry
+
+function toggleGearMenu(e) {
+  e.stopPropagation();
+  const menu = document.getElementById('gear-menu');
+  menu.classList.toggle('open');
+}
+// Close gear menu when clicking elsewhere
+document.addEventListener('click', () => {
+  document.getElementById('gear-menu')?.classList.remove('open');
+});
+
+function showGearBtn(entry) {
+  _gearEntry = entry;
+  const btn = document.getElementById('gear-btn');
+  const menu = document.getElementById('gear-menu');
+  btn.classList.add('visible');
+  // Build quality options
+  const labels = { 360: '360p · SD', 480: '480p · SD+', 720: '720p · HD', 1080: '1080p · FHD' };
+  menu.innerHTML = '<div class="gear-menu-title">⚙ Quality</div>';
+  [...Q_TIERS].reverse().forEach(q => {
+    const avail = !!(entry[`allanime_${q}`]);
+    const active = String(q) === String(activeQual);
+    const btn2 = document.createElement('button');
+    btn2.className = 'gear-q-btn' + (active ? ' active' : '') + (avail ? '' : ' unavail');
+    btn2.innerHTML = `<span>${labels[q] || q + 'p'}</span><span class="gear-q-badge">${active ? '✓' : (avail ? 'HD' : '✗')}</span>`;
+    if (avail) {
+      btn2.onclick = (ev) => {
+        ev.stopPropagation();
+        activeQual = String(q);
+        // Sync existing qual-row pills
+        document.querySelectorAll('.q-pill').forEach(p => p.classList.toggle('active', p.textContent.trim() === q + 'p'));
+        // Refresh gear menu
+        showGearBtn(entry);
+        document.getElementById('gear-menu').classList.remove('open');
+        if (activeServer?.type === 'multi-quality') playSrv(activeServer);
+      };
+    }
+    menu.appendChild(btn2);
+  });
+}
+
+function hideGearBtn() {
+  _gearEntry = null;
+  document.getElementById('gear-btn').classList.remove('visible');
+  document.getElementById('gear-menu').classList.remove('open');
+}
+
 function playSrv(srv) {
   let url;
-  if (srv.type === 'multi-quality') { url = getAllanimeUrl(srv.entry, activeQual); if (!url) for (const q of [480, 720, 360, 1080]) { url = srv.entry[`allanime_${q}`]; if (url) break; } }
-  else url = srv.url;
+  if (srv.type === 'multi-quality') {
+    url = getAllanimeUrl(srv.entry, activeQual);
+    if (!url) for (const q of [480, 720, 360, 1080]) { url = srv.entry[`allanime_${q}`]; if (url) break; }
+    showGearBtn(srv.entry); // show gear icon with all resolutions
+  } else {
+    url = srv.url;
+    hideGearBtn(); // hide gear icon for non-allanime servers
+  }
   if (!url) return;
   loadIframe(url, !!srv.adBlock);
   const frame = needsAdBlock(url) || srv.adBlock ? document.getElementById('pf-adblock') : document.getElementById('pf-sb');
@@ -1720,9 +1875,8 @@ function watchEnd(iframe, malId, ep, lang) {
   stopEndWatch(); let active = true;
   function onMsg(e) { if (!active) return; const s = typeof e.data === 'string' ? e.data : JSON.stringify(e.data || ''); if (/ended|complete|finish|event.*end/i.test(s)) { cleanup(); triggerAN(malId, ep, lang); } }
   window.addEventListener('message', onMsg);
-  let settled = false; const st = setTimeout(() => { settled = true; }, 1500);
-  endWatchInt = setInterval(() => { if (!active || !settled) return; try { const s = iframe.src || ''; if (s === '' || s === 'about:blank') { cleanup(); triggerAN(malId, ep, lang); } } catch (_) {} }, 2000);
-  function cleanup() { active = false; clearTimeout(st); clearInterval(endWatchInt); endWatchInt = null; window.removeEventListener('message', onMsg); endWatchClean = null; }
+  // Only listen for postMessage-based end events; do NOT poll iframe.src (causes false auto-next)
+  function cleanup() { active = false; clearInterval(endWatchInt); endWatchInt = null; window.removeEventListener('message', onMsg); endWatchClean = null; }
   endWatchClean = cleanup;
 }
 
@@ -1752,7 +1906,7 @@ function isMega(url) { return /megaplay\.buzz/i.test(url); }
 function loadIframe(url, forceAdBlock = false) {
   const plain = document.getElementById('pf-plain'); const sb = document.getElementById('pf-sb'); const adblock = document.getElementById('pf-adblock'); const ph = document.getElementById('player-ph');
   stopEndWatch(); ph.style.display = 'none';
-  function hideAll() { plain.style.display = 'none'; plain.src = 'about:blank'; sb.style.display = 'none'; sb.src = 'about:blank'; adblock.style.display = 'none'; adblock.src = 'about:blank'; }
+  function hideAll() { plain.style.display = 'none'; plain.src = 'about:blank'; sb.style.display = 'none'; sb.src = 'about:blank'; adblock.style.display = 'none'; adblock.src = 'about:blank'; const hv = document.getElementById('hls-video-el'); if (hv) { hv.style.display = 'none'; hv.pause && hv.pause(); } }
   if (forceAdBlock || needsAdBlock(url)) { hideAll(); adblock.src = url; adblock.style.display = 'block'; }
   else if (isMega(url)) { hideAll(); plain.src = url; plain.style.display = 'block'; }
   else { hideAll(); sb.src = url; sb.style.display = 'block'; }
@@ -1768,15 +1922,119 @@ function switchSrc(src) {
   document.getElementById('tab-agg').classList.toggle('active', src === 'animegg');
   document.getElementById('tab-anidb').classList.toggle('active', src === 'anidb');
   document.getElementById('tab-m4u').classList.toggle('active', src === 'm4uhd');
+  document.getElementById('tab-hls').classList.toggle('active', src === 'hlsplayer');
   const hiRow = document.getElementById('hi-subsrc-row'); const qRow = document.getElementById('qual-row');
   document.getElementById('m4u-status-row').classList.remove('show'); document.getElementById('agg-status-row').classList.remove('show'); document.getElementById('anidb-status-row').classList.remove('show');
   const ph = document.getElementById('player-ph'); if (ph.querySelector('a')) ph.innerHTML = '<div class="loading-spin"></div>';
-  if (src === 'hianime') { hiRow.classList.add('show'); qRow.style.display = 'none'; renderHiList(); }
-  else if (src === 'm4uhd') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderM4UList(); }
-  else if (src === 'animegg') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAnimeGGList(); }
-  else if (src === 'anidb') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAniDBList(); }
-  else { hiRow.classList.remove('show'); qRow.style.display = ''; renderACList(); }
+  const hlsPanel = document.getElementById('hls-panel');
+  const srvLoading = document.getElementById('srv-loading');
+  const srvList = document.getElementById('srv-list-inner');
+  const skipInfo = document.getElementById('skip-info-row');
+  if (src === 'hlsplayer') {
+    hiRow.classList.remove('show'); qRow.style.display = 'none';
+    srvLoading.style.display = 'none'; srvList.style.display = 'none'; skipInfo.classList.remove('show');
+    hlsPanel.style.display = 'flex';
+    hideGearBtn();
+    // Show placeholder in player
+    ph.style.display = 'flex';
+    ph.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--text2);text-align:center;padding:24px;max-width:280px"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="var(--accent)" stroke="none"/></svg><div style="font-size:13px;font-weight:700;color:var(--text)">HLS / M3U8 Player</div><div style="font-size:11px;line-height:1.6">Paste a stream URL below and click Play</div></div>`;
+  } else {
+    hlsPanel.style.display = 'none';
+    srvList.style.display = ''; // restore grid
+    if (src === 'hianime') { hiRow.classList.add('show'); qRow.style.display = 'none'; renderHiList(); }
+    else if (src === 'm4uhd') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderM4UList(); }
+    else if (src === 'animegg') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAnimeGGList(); }
+    else if (src === 'anidb') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAniDBList(); }
+    else { hiRow.classList.remove('show'); qRow.style.display = ''; renderACList(); }
+  }
 }
+
+// ═══════════════════════════════════════════════════════════
+//  HLS / M3U8 ADVANCED PLAYER
+// ═══════════════════════════════════════════════════════════
+let _hlsInstance = null;
+
+function playHLS() {
+  const url = document.getElementById('hls-url-inp').value.trim();
+  const referer = document.getElementById('hls-ref-inp').value.trim();
+  const origin = document.getElementById('hls-ori-inp').value.trim();
+  const statusEl = document.getElementById('hls-status');
+  const ph = document.getElementById('player-ph');
+
+  if (!url) { statusEl.style.color = 'var(--orange)'; statusEl.textContent = '⚠ Please enter an HLS / M3U8 URL.'; return; }
+  statusEl.style.color = 'var(--text3)'; statusEl.textContent = '⏳ Loading stream…';
+
+  // Destroy previous hls instance
+  if (_hlsInstance) { try { _hlsInstance.destroy(); } catch (_) {} _hlsInstance = null; }
+
+  // Hide iframes, show our hls video element
+  ['pf-plain','pf-sb','pf-adblock'].forEach(id => { const f = document.getElementById(id); f.style.display = 'none'; try { f.src = 'about:blank'; } catch(_) {} });
+  ph.style.display = 'none';
+
+  let videoEl = document.getElementById('hls-video-el');
+  if (!videoEl) {
+    videoEl = document.createElement('video');
+    videoEl.id = 'hls-video-el';
+    videoEl.controls = true;
+    videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;background:#000;';
+    document.getElementById('player-main').appendChild(videoEl);
+  }
+  videoEl.style.display = 'block';
+
+  // Build xhrSetup for referer/origin headers
+  const xhrSetup = (xhr) => {
+    if (referer) xhr.setRequestHeader('Referer', referer);
+    if (origin) xhr.setRequestHeader('Origin', origin);
+  };
+
+  const isM3U8 = url.includes('.m3u8') || url.includes('m3u8') || url.includes('/hls/') || url.includes('playlist');
+
+  if (typeof Hls !== 'undefined' && Hls.isSupported() && isM3U8) {
+    const hls = new Hls({ xhrSetup, enableWorker: true, lowLatencyMode: false });
+    _hlsInstance = hls;
+    hls.loadSource(url);
+    hls.attachMedia(videoEl);
+    hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+      statusEl.style.color = 'var(--green)';
+      const levels = data.levels || [];
+      if (levels.length > 1) {
+        const qs = levels.map((l,i) => `${l.height || '?'}p`).join(', ');
+        statusEl.textContent = `✓ Stream loaded — ${levels.length} quality levels: ${qs}`;
+      } else {
+        statusEl.textContent = '✓ Stream loaded successfully';
+      }
+      videoEl.play().catch(() => {});
+    });
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        statusEl.style.color = '#f87171'; statusEl.textContent = `✗ Stream error: ${data.type} — ${data.details}`;
+      }
+    });
+  } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+    // Native HLS (Safari)
+    videoEl.src = url;
+    videoEl.play().catch(() => {});
+    statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Using native HLS playback';
+  } else {
+    // Not HLS — try direct src
+    videoEl.src = url;
+    videoEl.play().catch(() => {});
+    statusEl.style.color = 'var(--text2)'; statusEl.textContent = '▶ Playing direct stream';
+  }
+}
+
+// Load hls.js dynamically only when needed
+function ensureHlsJS(cb) {
+  if (typeof Hls !== 'undefined') { cb(); return; }
+  const s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.8/hls.min.js';
+  s.onload = cb; s.onerror = cb;
+  document.head.appendChild(s);
+}
+
+// Override playHLS to ensure hls.js is loaded first
+const _playHLSOrig = playHLS;
+window.playHLS = function() { ensureHlsJS(_playHLSOrig); };
 
 function updateSrcTabOpacity() {
   document.getElementById('tab-ac').style.opacity = serverData.length ? '1' : '0.4';
