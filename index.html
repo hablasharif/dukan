@@ -227,6 +227,29 @@ html, body { width: 100%; height: 100%; background: var(--bg); font-family: 'Int
 /* ── OLD dropdown — remove ── */
 /* We remove the old #search-dropdown */
 
+/* Backdrop: sits above the home view but below navbar/topbar.
+   Dims + fully blocks mouse/touch interaction with whatever is
+   scrolled underneath the search topbar so hover/click can't
+   "bleed through" onto hero/airing/top/popular cards. */
+#search-backdrop {
+  position: fixed;
+  top: 58px; left: 0; right: 0; bottom: 0;
+  z-index: 150;
+  background: rgba(0,0,0,.55);
+  backdrop-filter: blur(2px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s ease;
+}
+#search-backdrop.show { opacity: 1; pointer-events: all; }
+
+/* While search is active, freeze the home view so it can't be
+   scrolled or hovered/clicked underneath the results panel. */
+#view-home.search-locked {
+  overflow: hidden;
+  pointer-events: none;
+}
+
 /* ════════ REST OF STYLES (unchanged from original) ════════ */
 
 #hero {
@@ -481,6 +504,9 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
       No anime found. Try a different title.
     </div>
   </div>
+
+  <!-- Backdrop shown behind the search topbar; blocks & dims everything underneath -->
+  <div id="search-backdrop" onclick="clearSearch()"></div>
 
   <!-- HOME VIEW -->
   <div id="view-home">
@@ -1112,8 +1138,19 @@ const searchInp   = document.getElementById('search-inp');
 const searchClear = document.getElementById('search-clear');
 const searchTopbar = document.getElementById('search-topbar');
 
-function openTopBar() { searchTopbar.classList.add('open'); }
-function closeTopBar() { searchTopbar.classList.remove('open'); }
+const searchBackdrop = document.getElementById('search-backdrop');
+const viewHomeEl = document.getElementById('view-home');
+
+function openTopBar() {
+  searchTopbar.classList.add('open');
+  searchBackdrop.classList.add('show');
+  viewHomeEl.classList.add('search-locked');
+}
+function closeTopBar() {
+  searchTopbar.classList.remove('open');
+  searchBackdrop.classList.remove('show');
+  viewHomeEl.classList.remove('search-locked');
+}
 
 function setTopBarState(state, results, query) {
   const loading  = document.getElementById('stb-loading');
