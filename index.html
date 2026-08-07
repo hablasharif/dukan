@@ -940,7 +940,6 @@ const ANIMEGG_FILES = Array.from({length:20},(_,i)=>i===0?'animegg_series.json':
 // AniDB: client-side extractor loaded from anidb-statick.onrender.com
 const ANIDB_CLIENT_BASE = 'https://anidb-statick.onrender.com';
 const ANISKIP_BASE  = 'https://api.aniskip.com/v2/skip-times';
-const ANIME_LIST_URL= 'https://raw.githubusercontent.com/Fribb/anime-lists/refs/heads/master/anime-list-full.json';
 const M4U_BASE         = 'https://raw.githubusercontent.com/ytbro8326-sudo/m4uhurlcollector-main4_seris/refs/heads/main/';
 const M4U_SERIES_FILES = Array.from({length:10},(_,i)=>i===0?'series.json':`series${i+1}.json`);
 const M4U_MOVIES_FILES = Array.from({length:25},(_,i)=>i===0?'movies.json':`movies${i+1}.json`);
@@ -974,8 +973,6 @@ let endWatchInt     = null;
 let endWatchClean   = null;
 let _hiCacheRaw     = null;
 let _hiLoadProm     = null;
-let _animeListCache = null;
-let _animeListProm  = null;
 let debounceT       = null;
 let sectionLoadToken= 0;
 let isSearchMode    = false;
@@ -1651,14 +1648,9 @@ async function _loadAnidbClient() {
   return _anidbClientMod;
 }
 
-// Resolves malId -> anilistId. Returns { anilistId, via } or throws with a clear reason.
+// Resolves malId -> anilistId via AniList's GraphQL API directly (single
+// fast request; no dependency on any third-party mirrored JSON database).
 async function _resolveAnilistIdFromMal(malId) {
-  try {
-    const mapping = await loadAnimeList(); // Fribb anime-list-full.json, already used elsewhere on this site
-    const entry = Array.isArray(mapping) && mapping.find(e => Number(e.mal_id) === Number(malId));
-    if (entry && entry.anilist_id) return { anilistId: entry.anilist_id, via: 'Fribb mapping' };
-  } catch (_) {}
-
   try {
     const query = `query($malId:Int){Media(idMal:$malId,type:ANIME){id}}`;
     const res = await fetch('https://graphql.anilist.co', {
@@ -2026,21 +2018,29 @@ async function loadM4UMovies() {
   _m4uMoviesProm = Promise.all(M4U_MOVIES_FILES.map(f => fetch(M4U_BASE + f).then(r => r.ok ? r.json() : []).catch(() => []))).then(results => { _m4uMoviesCache = results.flat().filter(Boolean); _m4uMoviesProm = null; return _m4uMoviesCache; });
   return _m4uMoviesProm;
 }
-async function loadAnimeList() {
-  if (_animeListCache) return _animeListCache; if (_animeListProm) return _animeListProm;
-  _animeListProm = fetch(ANIME_LIST_URL).then(r => r.ok ? r.json() : []).then(data => { _animeListCache = Array.isArray(data) ? data : []; _animeListProm = null; return _animeListCache; }).catch(() => { _animeListProm = null; return []; });
-  return _animeListProm;
-}
-async function findM4UEntryByMalId(malId) {
-  if (!malId) return null; const list = await loadAnimeList(); const mid = parseInt(malId, 10);
-  const mapObj = list.find(e => parseInt(e.mal_id, 10) === mid);
-  const tmdbTvId = mapObj?.themoviedb_id?.tv || mapObj?.themoviedb_id?.movie;
-  if (tmdbTvId) { const sSeries = await loadM4USeries(); const sMovie = await loadM4UMovies(); const foundS = sSeries.find(e => String(e.tmdb_id) === String(tmdbTvId)); if (foundS) return { entry: foundS, isMovie: false }; const foundM = sMovie.find(e => String(e.tmdb_id) === String(tmdbTvId)); if (foundM) return { entry: foundM, isMovie: true }; }
+async function findM4UEntryByTitle(title) {
+  if (!title) return null;
+  const norm = _normTitle(title);
+  if (!norm) return null;
+  const [sSeries, sMovie] = await Promise.all([loadM4USeries(), loadM4UMovies()]);
+  const exactS = sSeries.find(e => _normTitle(e.title) === norm);
+  if (exactS) return { entry: exactS, isMovie: false };
+  const exactM = sMovie.find(e => _normTitle(e.title) === norm);
+  if (exactM) return { entry: exactM, isMovie: true };
+  // Fallback: closest partial match (one title contains the other) —
+  // handles minor naming differences like subtitle/season suffixes.
+  const partialS = sSeries.find(e => { const n = _normTitle(e.title); return n && (n.includes(norm) || norm.includes(n)); });
+  if (partialS) return { entry: partialS, isMovie: false };
+  const partialM = sMovie.find(e => { const n = _normTitle(e.title); return n && (n.includes(norm) || norm.includes(n)); });
+  if (partialM) return { entry: partialM, isMovie: true };
   return null;
+}
+function _normTitle(t) {
+  return String(t || '').toLowerCase().replace(/\(.*?\)/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 }
 async function fetchM4UForCurrentMedia() {
   if (!playerMalId) return; m4uSeriesEntry = null; m4uMovieEntry = null;
-  try { const res = await findM4UEntryByMalId(playerMalId); if (res?.entry) { if (res.isMovie) m4uMovieEntry = res.entry; else m4uSeriesEntry = res.entry; setM4UStatus(`✓ Found: ${res.entry.title}`, true); document.getElementById('tab-m4u').style.opacity = '1'; if (activeSrc === 'm4uhd') renderM4UList(); } else setM4UStatus('Not in M4UHD library', false); } catch(e) { setM4UStatus('M4UHD lookup failed', false); }
+  try { const res = await findM4UEntryByTitle(playerTitle); if (res?.entry) { if (res.isMovie) m4uMovieEntry = res.entry; else m4uSeriesEntry = res.entry; setM4UStatus(`✓ Found: ${res.entry.title}`, true); document.getElementById('tab-m4u').style.opacity = '1'; if (activeSrc === 'm4uhd') renderM4UList(); } else setM4UStatus('Not in M4UHD library', false); } catch(e) { setM4UStatus('M4UHD lookup failed', false); }
 }
 function setM4UStatus(text, found) {
   const row = document.getElementById('m4u-status-row'); const span = document.getElementById('m4u-status-text');
@@ -2112,17 +2112,16 @@ async function initHome() {
   loadHero(); loadAiringRow(); loadTopRow(); loadPopularGrid();
 
   // Everything below is only needed once someone opens the player
-  // (M4UHD tab, AnimeGG tab, AniDB MAL→AniList matching) — previously
-  // these 4 heavy multi-file JSON databases were downloaded on every
-  // single page load before the home page even finished painting.
-  // Warming them in idle time keeps the home page fast while still
-  // having them ready in the background by the time they're needed.
+  // (M4UHD tab, AnimeGG tab) — these multi-file JSON databases used to
+  // be downloaded on every single page load before the home page even
+  // finished painting. Warming them in idle time keeps the home page
+  // fast while still having them ready in the background by the time
+  // they're needed.
   schedulePrefetchHomeExtras();
 }
 
 function schedulePrefetchHomeExtras() {
   const run = () => {
-    loadAnimeList().catch(() => {});
     loadM4USeries().catch(() => {});
     loadM4UMovies().catch(() => {});
     loadAnimeGG().catch(() => {});
@@ -2500,7 +2499,14 @@ function renderAnimeGGList() {
   srvs.forEach((srv, i) => { const btn = document.createElement('button'); btn.className = 'srv-item agg' + (i === di ? ' active' : ''); btn.innerHTML = `<span>${srv.label}</span><span class="srv-badge-sm">${srv.badge}</span>`; btn.onclick = () => { document.querySelectorAll('.srv-item').forEach(b => b.classList.remove('active')); btn.classList.add('active'); activeServer = srv; prefSrvKey = srv.key; playAnimeGGSrv(srv); }; list.appendChild(btn); if (i === di) activeServer = srv; });
   if (srvs[di]) playAnimeGGSrv(srvs[di]);
 }
-function playAnimeGGSrv(srv) { if (!srv?.url) return; loadIframe(srv.url, !!srv.adBlock); watchEnd(srv.adBlock ? document.getElementById('pf-adblock') : document.getElementById('pf-plain'), playerMalId, playerEp, playerLang); }
+function playAnimeGGSrv(srv) {
+  if (!srv?.url) return;
+  // AnimeGG embeds should never run inside the sandboxed iframe — sandboxing
+  // breaks their players, so anything that isn't already an ad-block host
+  // goes into the plain (unsandboxed) frame instead.
+  loadIframe(srv.url, !!srv.adBlock, !srv.adBlock);
+  watchEnd(srv.adBlock ? document.getElementById('pf-adblock') : document.getElementById('pf-plain'), playerMalId, playerEp, playerLang);
+}
 
 // ═══════════════════════════════════════════════════════════
 //  ANISANTCH FETCH & RENDER
@@ -2640,8 +2646,15 @@ function playSrv(srv) {
     hideGearBtn(); // hide gear icon for non-allanime servers
   }
   if (!url) return;
-  loadIframe(url, !!srv.adBlock);
-  const frame = needsAdBlock(url) || srv.adBlock ? document.getElementById('pf-adblock') : document.getElementById('pf-sb');
+  // HiAnime's embeds (StreamHG, EarnVids, DoodStream, ViviBebe, Bibiemb) don't
+  // work correctly when sandboxed, so they always run in the plain iframe.
+  // AnisantCH's own servers keep the sandboxed default for security, unless
+  // they hit a known ad-heavy host that needs the ad-block frame instead.
+  const noSandbox = srv.source === 'hianime';
+  loadIframe(url, !!srv.adBlock, noSandbox);
+  const frame = needsAdBlock(url) || srv.adBlock
+    ? document.getElementById('pf-adblock')
+    : (noSandbox ? document.getElementById('pf-plain') : document.getElementById('pf-sb'));
   watchEnd(frame, playerMalId, playerEp, playerLang);
 }
 
@@ -2686,12 +2699,12 @@ const ADBLOCK_HOSTS = [/insertunit\.ws/i, /nxsha\.app/i, /111movies\.net/i, /any
 function needsAdBlock(url) { return ADBLOCK_HOSTS.some(re => re.test(url)); }
 function isMega(url) { return /megaplay\.buzz/i.test(url); }
 
-function loadIframe(url, forceAdBlock = false) {
+function loadIframe(url, forceAdBlock = false, noSandbox = false) {
   const plain = document.getElementById('pf-plain'); const sb = document.getElementById('pf-sb'); const adblock = document.getElementById('pf-adblock'); const ph = document.getElementById('player-ph');
   stopEndWatch(); ph.style.display = 'none';
   function hideAll() { plain.style.display = 'none'; plain.src = 'about:blank'; sb.style.display = 'none'; sb.src = 'about:blank'; adblock.style.display = 'none'; adblock.src = 'about:blank'; const hv = document.getElementById('hls-video-el'); if (hv) { hv.style.display = 'none'; hv.pause && hv.pause(); } }
   if (forceAdBlock || needsAdBlock(url)) { hideAll(); adblock.src = url; adblock.style.display = 'block'; }
-  else if (isMega(url)) { hideAll(); plain.src = url; plain.style.display = 'block'; }
+  else if (isMega(url) || noSandbox) { hideAll(); plain.src = url; plain.style.display = 'block'; }
   else { hideAll(); sb.src = url; sb.style.display = 'block'; }
 }
 
