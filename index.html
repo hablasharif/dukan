@@ -290,13 +290,13 @@ input:checked + .slider-sm:before { transform: translateX(12px); }
 iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; z-index: 2; }
 
 /* SKIP INTRO BAR */
-#skip-bar { position: absolute; bottom: 24px; left: 24px; z-index: 10; display: none; gap: 8px; }
-#skip-bar.show { display: flex; }
+#skip-bar { position: absolute; bottom: 24px; left: 24px; z-index: 10; display: flex; gap: 8px; }
 .skip-btn { display: flex; align-items: center; gap: 6px; padding: 9px 16px; border-radius: 20px; border: 1px solid rgba(255,255,255,.2); background: rgba(0,0,0,.8); backdrop-filter: blur(8px); color: #fff; font-size: 12px; font-weight: 700; cursor: pointer; transition: all .2s; }
 .skip-btn:hover { background: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
 .skip-timer { font-size: 10px; opacity: .7; }
 .auto-skip-toast { cursor: default; border-color: rgba(52,211,153,.4); background: rgba(16,20,17,.9); color: var(--green); }
 .auto-skip-toast:hover { background: rgba(16,20,17,.9); border-color: rgba(52,211,153,.4); transform: none; }
+#autoskip-btn.active-toggle { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 /* AUTO NEXT OVERLAY */
 #an-overlay { position: absolute; inset: 0; z-index: 20; background: rgba(7,7,13,.92); backdrop-filter: blur(10px); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
@@ -774,10 +774,6 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
         </button>
         <span class="an-label">Auto-next</span>
         <label class="switch-sm"><input type="checkbox" id="chk-an" checked><span class="slider-sm"></span></label>
-        <span class="an-label">Auto-skip</span>
-        <label class="switch-sm" title="Automatically skip intro/outro when AniSkip has data for this episode">
-          <input type="checkbox" id="chk-autoskip" onchange="toggleAutoSkip()"><span class="slider-sm"></span>
-        </label>
       </div>
     </div>
 
@@ -803,7 +799,11 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
             <!-- populated by JS -->
           </div>
 
-          <div id="skip-bar">
+          <div id="skip-bar" class="show">
+            <button class="skip-btn" id="autoskip-btn" onclick="toggleAutoSkip()" title="When on, intro/outro are skipped automatically the moment they're reached">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="5 4 15 12 5 20"/><line x1="19" y1="4" x2="19" y2="20"/></svg>
+              <span id="autoskip-btn-label">Auto-Skip: Off</span>
+            </button>
             <button class="skip-btn" id="skip-op-btn" onclick="skipIntro()" style="display:none">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="5 4 15 12 5 20"/><line x1="19" y1="4" x2="19" y2="20"/></svg>
               Skip Intro <span class="skip-timer" id="skip-op-timer"></span>
@@ -2086,7 +2086,7 @@ async function fetchSkipTimes(malId, ep) {
 }
 function clearSkipUI() {
   document.getElementById('skip-op-btn').style.display = 'none'; document.getElementById('skip-ed-btn').style.display = 'none';
-  document.getElementById('skip-bar').classList.remove('show'); document.getElementById('skip-info-row').classList.remove('show');
+  document.getElementById('skip-info-row').classList.remove('show');
   document.getElementById('skip-info-inner').innerHTML = ''; stopSkipFakeClock();
 }
 function updateSkipInfoPanel() {
@@ -2101,29 +2101,38 @@ function startSkipFakeClock() {
   stopSkipFakeClock(); skipFakeTime = 0;
   skipFakeTimer = setInterval(() => {
     skipFakeTime++; const t = skipFakeTime;
-    const opBtn = document.getElementById('skip-op-btn'); const edBtn = document.getElementById('skip-ed-btn'); let anyVisible = false;
+    const opBtn = document.getElementById('skip-op-btn'); const edBtn = document.getElementById('skip-ed-btn');
     if (skipTimes.op && t >= skipTimes.op.start - 2 && t < skipTimes.op.end) {
       if (autoSkipEnabled && t >= skipTimes.op.start) { skipIntro(true); return; }
-      const rem = Math.max(0, Math.round(skipTimes.op.end - t)); opBtn.style.display = ''; document.getElementById('skip-op-timer').textContent = rem > 0 ? rem + 's' : ''; anyVisible = true;
+      const rem = Math.max(0, Math.round(skipTimes.op.end - t)); opBtn.style.display = ''; document.getElementById('skip-op-timer').textContent = rem > 0 ? rem + 's' : '';
     } else opBtn.style.display = 'none';
     if (skipTimes.ed && t >= skipTimes.ed.start - 2 && t < skipTimes.ed.end) {
       if (autoSkipEnabled && t >= skipTimes.ed.start) { skipOutro(true); return; }
-      const rem = Math.max(0, Math.round(skipTimes.ed.end - t)); edBtn.style.display = ''; document.getElementById('skip-ed-timer').textContent = rem > 0 ? rem + 's' : ''; anyVisible = true;
+      const rem = Math.max(0, Math.round(skipTimes.ed.end - t)); edBtn.style.display = ''; document.getElementById('skip-ed-timer').textContent = rem > 0 ? rem + 's' : '';
     } else edBtn.style.display = 'none';
-    document.getElementById('skip-bar').classList.toggle('show', anyVisible);
   }, 1000);
 }
 function stopSkipFakeClock() { if (skipFakeTimer) { clearInterval(skipFakeTimer); skipFakeTimer = null; } skipFakeTime = 0; }
-function skipIntro(auto) { if (!skipTimes.op) return; skipFakeTime = Math.ceil(skipTimes.op.end) + 1; document.getElementById('skip-op-btn').style.display = 'none'; document.getElementById('skip-bar').classList.remove('show'); trySeekFrame(skipTimes.op.end); if (auto) flashAutoSkipToast('Intro'); }
-function skipOutro(auto) { if (!skipTimes.ed) return; skipFakeTime = Math.ceil(skipTimes.ed.end) + 1; document.getElementById('skip-ed-btn').style.display = 'none'; document.getElementById('skip-bar').classList.remove('show'); trySeekFrame(skipTimes.ed.end); if (auto) flashAutoSkipToast('Outro'); }
+function skipIntro(auto) { if (!skipTimes.op) return; skipFakeTime = Math.ceil(skipTimes.op.end) + 1; document.getElementById('skip-op-btn').style.display = 'none'; trySeekFrame(skipTimes.op.end); if (auto) flashAutoSkipToast('Intro'); }
+function skipOutro(auto) { if (!skipTimes.ed) return; skipFakeTime = Math.ceil(skipTimes.ed.end) + 1; document.getElementById('skip-ed-btn').style.display = 'none'; trySeekFrame(skipTimes.ed.end); if (auto) flashAutoSkipToast('Outro'); }
 function trySeekFrame(t) { const frames = [document.getElementById('pf-plain'), document.getElementById('pf-sb'), document.getElementById('pf-adblock')]; const active = frames.find(f => f.style.display !== 'none'); if (active) { try { active.contentWindow.postMessage({ action: 'seekTo', time: t }, '*'); } catch {} } }
 
 // Toggle for the Auto-Skip switch in the player top bar. When on, AniSkip
 // intro/outro windows are skipped automatically the moment they're reached —
 // no click needed. Preference is remembered for next time.
+// Auto-Skip button (bottom-left over the video, always visible during
+// playback). Click toggles it on/off; the preference is remembered.
 function toggleAutoSkip() {
-  autoSkipEnabled = document.getElementById('chk-autoskip').checked;
+  autoSkipEnabled = !autoSkipEnabled;
   localStorage.setItem('autoSkipEnabled', autoSkipEnabled ? '1' : '0');
+  updateAutoSkipBtnUI();
+}
+function updateAutoSkipBtnUI() {
+  const btn = document.getElementById('autoskip-btn');
+  const label = document.getElementById('autoskip-btn-label');
+  if (!btn || !label) return;
+  label.textContent = autoSkipEnabled ? 'Auto-Skip: On' : 'Auto-Skip: Off';
+  btn.classList.toggle('active-toggle', autoSkipEnabled);
 }
 
 // Brief, non-interactive confirmation shown in the skip-bar area right after
@@ -2958,8 +2967,8 @@ function updateSrcTabOpacity() {
 // ═══════════════════════════════════════════════════════════
 //  INIT
 // ═══════════════════════════════════════════════════════════
-const _chkAutoSkip = document.getElementById('chk-autoskip');
-if (_chkAutoSkip) _chkAutoSkip.checked = autoSkipEnabled;
+const _chkAutoSkip = document.getElementById('autoskip-btn');
+if (_chkAutoSkip) updateAutoSkipBtnUI();
 initHome();
 </script>
 </body>
