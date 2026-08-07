@@ -62,7 +62,7 @@ html, body { width: 100%; height: 100%; background: var(--bg); font-family: 'Int
   background-clip: text; white-space: nowrap; cursor: pointer; flex-shrink: 0;
 }
 .logo span { -webkit-text-fill-color: transparent; }
-#search-wrap { flex: 1; max-width: 480px; position: relative; }
+#search-wrap { flex: 1; min-width: 0; max-width: 480px; position: relative; }
 #search-inp {
   width: 100%; padding: 9px 36px 9px 40px;
   background: var(--bg3); border: 1px solid var(--border2);
@@ -570,6 +570,44 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
   #stb-header { padding: 8px 16px; }
   #stb-grid { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 10px; }
 }
+
+/* ── EXTRA SMALL PHONES ── */
+@media (max-width: 480px) {
+  html, body { overflow-x: hidden; }
+  #navbar { padding: 0 10px; gap: 6px; height: 52px; }
+  .logo { font-size: 16px; }
+  #search-inp { padding: 8px 32px 8px 34px; font-size: 13px; }
+  .search-icon { left: 11px; }
+  #nav-btn-row { gap: 5px; }
+  .nav-btn { padding: 6px 10px; font-size: 10.5px; }
+  #hero { min-height: 300px; padding: 0 14px 18px; }
+  #hero-title { font-size: clamp(19px, 6.5vw, 26px); }
+  #hero-desc { -webkit-line-clamp: 2; font-size: 12px; max-width: 100%; }
+  #hero-actions { gap: 8px; }
+  .hero-btn { padding: 9px 16px; font-size: 12.5px; }
+  .anime-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
+  .section-title, .section-head { font-size: 15px; }
+  #ep-modal { border-radius: 16px; max-height: 90vh; }
+  #ep-modal-header { padding: 12px 14px; gap: 10px; }
+  #ep-modal-poster { width: 40px; height: 56px; }
+  #ep-modal-title { font-size: 13.5px; }
+  #ep-list { grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); padding: 8px 14px 14px; gap: 6px; }
+  #ep-panel-grid { grid-template-columns: repeat(4, 1fr); }
+  #src-tabs { gap: 4px; }
+  .src-t { padding: 6px 9px; font-size: 10.5px; }
+  #srv-list-inner { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
+  .srv-item { font-size: 11px; padding: 8px 8px; }
+  #player-show-title { max-width: 100px; font-size: 12.5px; }
+  #player-server-section { padding: 12px 12px 20px; }
+  #hls-panel > div[style*="display:flex"] { flex-wrap: wrap; }
+  #stb-grid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
+  #stb-query-text { font-size: 12px; }
+}
+
+/* Let flex-basis inputs actually shrink instead of overflowing on narrow screens */
+#search-inp, #hls-url-inp, #hls-ref-inp, #hls-ori-inp, #anidb-manual-inp, #em-ep-search {
+  min-width: 0;
+}
 </style>
 </head>
 <body>
@@ -809,9 +847,10 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
           <div id="hls-panel" style="display:none;flex-direction:column;gap:12px;">
             <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.06em;">📡 Advanced HLS / M3U8 Player</div>
             <div style="display:flex;gap:8px;align-items:stretch;">
-              <input id="hls-url-inp" type="text" placeholder="Paste .m3u8, HLS, or anidb.app/embed/ link…"
-                style="flex:1;padding:9px 14px;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);font-size:12.5px;outline:none;transition:border-color .2s;"
+              <input id="hls-url-inp" type="text" placeholder="Paste .m3u8, HLS, or anidb.app/embed/ link… (auto-filled from AniDB)"
+                style="flex:1;min-width:0;padding:9px 14px;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);font-size:12.5px;outline:none;transition:border-color .2s;"
                 onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'"
+                oninput="this.dataset.userEdited='1'"
                 onkeydown="if(event.key==='Enter')playHLS()">
               <button onclick="playHLS()" style="padding:9px 16px;border-radius:9px;border:none;background:var(--accent);color:#fff;font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0;white-space:nowrap;">▶ Play</button>
             </div>
@@ -935,6 +974,14 @@ let _animeggCache   = null;
 let _animeggProm    = null;
 let anidbEntry      = null;
 // _anidbCache/_anidbProm removed — per-episode cache now in _anidbApiCache (inside fetchAniDBStreams)
+let _acCache        = null;
+let _acLoadProm     = null;
+// Tracks which source tabs have already been fetched for the CURRENT
+// malId/ep/lang combo, so switching tabs back and forth (or reloading
+// the same episode) doesn't re-hit the network — part of the lazy
+// "only fetch what the user actually looks at" loading strategy.
+let _srcLoadedKey   = { anisantch: null, hianime: null, animegg: null, m4uhd: null };
+let _idlePrefetchDone = false;
 let skipTimes       = { op: null, ed: null };
 let skipFakeTime    = 0;
 let skipFakeTimer   = null;
@@ -1657,6 +1704,30 @@ function _showAnidbManualFallback(show) {
   if (row) row.style.display = show ? 'flex' : 'none';
 }
 
+// Auto-paste the best AniDB stream into the HLS Player's URL field —
+// DUB is preferred, falling back to SUB if no dub is available. This
+// runs automatically whenever AniDB streams resolve (regardless of
+// which server tab is currently open) so the HLS input is always
+// pre-filled and ready to play. Never overwrites a URL the person
+// typed in themselves.
+function fillHlsInputFromAniDB(streams) {
+  if (!streams || !streams.length) return;
+  const dub = streams.find(s => s.audio === 'dub');
+  const sub = streams.find(s => s.audio === 'sub' || s.audio !== 'dub');
+  const pick = dub || sub;
+  if (!pick || !pick.url) return;
+  const urlInp = document.getElementById('hls-url-inp');
+  const refInp = document.getElementById('hls-ref-inp');
+  if (!urlInp || urlInp.dataset.userEdited === '1') return;
+  urlInp.value = pick.url;
+  if (refInp && pick.referer) refInp.value = pick.referer;
+  const statusEl = document.getElementById('hls-status');
+  if (statusEl && !statusEl.textContent) {
+    statusEl.style.color = 'var(--text3)';
+    statusEl.textContent = `📥 Auto-filled AniDB ${pick.audio === 'dub' ? 'DUB' : 'SUB'} stream — press Play to watch it here`;
+  }
+}
+
 async function fetchAniDBForCurrentMedia() {
   if (!playerMalId) return;
   anidbEntry = null;
@@ -1674,6 +1745,7 @@ async function fetchAniDBForCurrentMedia() {
       if (hasSub) parts.push('SUB');
       setAniDBStatus(`✓ AniDB — ${parts.join(' + ')} available`, true);
       document.getElementById('tab-anidb').style.opacity = '1';
+      fillHlsInputFromAniDB(streams);
       if (activeSrc === 'anidb') renderAniDBList();
     } else {
       // Show the specific failure reason instead of a generic message
@@ -1730,6 +1802,7 @@ async function anidbManualSearch() {
     if (hasSub) parts.push('SUB');
     setAniDBStatus(`✓ AniDB (manual) — ${parts.join(' + ')} available`, true);
     document.getElementById('tab-anidb').style.opacity = '1';
+    fillHlsInputFromAniDB(streams);
     if (activeSrc === 'anidb') renderAniDBList();
   } catch (e) {
     statusEl.textContent = `✗ ${e.message}`;
@@ -2253,27 +2326,101 @@ async function loadEpisode(malId, ep, lang) {
   playerMalId = malId; playerEp = ep; playerLang = lang;
   document.getElementById('player-ep-label').textContent = `Episode ${ep}`;
   updateSideEpActive(ep);
+
+  // Reset per-source state for the new episode. Nothing heavy is
+  // fetched yet — that happens lazily below, per the smart-loading
+  // strategy: only what's on screen (or about to be) gets downloaded.
   setM4UStatus('', false); document.getElementById('tab-m4u').style.opacity = '0.4';
   setAGGStatus('', false); document.getElementById('tab-agg').style.opacity = '0.4';
   setAniDBStatus('', false); document.getElementById('tab-anidb').style.opacity = '0.4';
+  document.getElementById('tab-hi').style.opacity = '0.4';
+  m4uSeriesEntry = null; m4uMovieEntry = null; animeggEntry = null; anidbEntry = null; hianimeEntry = null;
+  const hlsInp = document.getElementById('hls-url-inp');
+  if (hlsInp && hlsInp.dataset.userEdited !== '1') hlsInp.value = '';
+  const hlsStatusEl = document.getElementById('hls-status'); if (hlsStatusEl) hlsStatusEl.textContent = '';
+
+  // ── INSTANT: MegaPlay is the default source. It plays immediately
+  // and has zero dependency on any of the JSON databases below — this
+  // is what makes the player feel instant instead of waiting on
+  // hundreds of KB/MB of JSON to download first. ──
   const megaSrc = `https://megaplay.buzz/stream/mal/${malId}/${ep}/${lang}?autostart=true`;
   loadIframe(megaSrc);
   serverData = [{ key: 'megaplay', label: 'MegaPlay', badge: 'MAL', url: megaSrc, source: 'anisantch', adBlock: false }];
-  hianimeEntry = null; animeggEntry = null; activeServer = serverData[0];
-  document.getElementById('qual-row').innerHTML = ''; document.getElementById('srv-list-inner').innerHTML = '';
-  document.getElementById('srv-loading').classList.add('show');
-  const [aEntry, hiEntry] = await Promise.all([fetchACEntry(malId, ep, lang), fetchHiEntry(malId, ep), fetchSkipTimes(malId, ep), fetchM4UForCurrentMedia(), fetchAnimeGGForCurrentMedia(), fetchAniDBForCurrentMedia()]);
-  document.getElementById('srv-loading').classList.remove('show');
-  if (aEntry)  serverData = [serverData[0], ...buildACSrvs(aEntry)];
-  if (hiEntry) hianimeEntry = hiEntry;
+  activeServer = serverData[0];
+  document.getElementById('qual-row').innerHTML = '';
+  document.getElementById('srv-list-inner').innerHTML = '';
+  watchEnd(document.getElementById('pf-plain'), malId, ep, lang);
+
+  // ── LAZY / SMART: fetch only what's needed right now —
+  //   • AniDB + skip-times are small single lookups, so they run every
+  //     time (this also keeps the HLS-input auto-fill up to date).
+  //   • The big multi-file JSON databases (AnisantCH extras, HiAnime,
+  //     AnimeGG, M4UHD) are only downloaded for the tab currently in
+  //     view, and are cached in memory afterwards so revisiting a tab
+  //     or episode never re-downloads them. ──
+  fetchSkipTimes(malId, ep);
+  fetchAniDBForCurrentMedia();
+  ensureSourceLoaded('anisantch');
+  if (activeSrc !== 'anisantch') ensureSourceLoaded(activeSrc);
   updateSrcTabOpacity();
-  if (activeSrc === 'hianime') renderHiList();
-  else if (activeSrc === 'm4uhd') renderM4UList();
-  else if (activeSrc === 'animegg') renderAnimeGGList();
-  else if (activeSrc === 'anidb') renderAniDBList();
+
+  // Warm the remaining tabs' caches in idle time (low priority, after
+  // MegaPlay + the active tab have what they need) so switching tabs
+  // later feels instant without slowing down the initial load.
+  schedulePrefetchOtherSources();
+}
+
+// Fetches (if not already cached for this exact malId/ep/lang) and
+// renders the data for one server tab. `silent=true` skips the loading
+// spinner and status-row UI — used for background prefetching.
+async function ensureSourceLoaded(src, silent) {
+  const key = `${playerMalId}/${playerEp}/${playerLang}`;
+  if (_srcLoadedKey[src] === key) {
+    if (!silent && activeSrc === src) renderSrcList(src);
+    return;
+  }
+  if (src !== 'anisantch' && src !== 'hianime' && src !== 'animegg' && src !== 'm4uhd') { _srcLoadedKey[src] = key; return; }
+  _srcLoadedKey[src] = key;
+  if (!silent && activeSrc === src) document.getElementById('srv-loading').classList.add('show');
+  try {
+    if (src === 'anisantch') {
+      const aEntry = await fetchACEntry(playerMalId, playerEp, playerLang);
+      if (`${playerMalId}/${playerEp}/${playerLang}` !== key) return; // episode changed while fetching
+      serverData = [serverData[0], ...(aEntry ? buildACSrvs(aEntry) : [])];
+      if (activeSrc === 'anisantch') renderACList();
+    } else if (src === 'hianime') {
+      const hiEntry = await fetchHiEntry(playerMalId, playerEp);
+      if (`${playerMalId}/${playerEp}/${playerLang}` !== key) return;
+      hianimeEntry = hiEntry;
+      document.getElementById('tab-hi').style.opacity = hiEntry ? '1' : '0.4';
+      if (activeSrc === 'hianime') renderHiList();
+    } else if (src === 'animegg') {
+      await fetchAnimeGGForCurrentMedia();
+      if (silent && activeSrc !== 'animegg') document.getElementById('agg-status-row').classList.remove('show');
+    } else if (src === 'm4uhd') {
+      await fetchM4UForCurrentMedia();
+      if (silent && activeSrc !== 'm4uhd') document.getElementById('m4u-status-row').classList.remove('show');
+    }
+  } catch (e) { console.warn('[source load]', src, e); }
+  if (!silent && activeSrc === src) document.getElementById('srv-loading').classList.remove('show');
+}
+
+function renderSrcList(src) {
+  if (src === 'hianime') renderHiList();
+  else if (src === 'm4uhd') renderM4UList();
+  else if (src === 'animegg') renderAnimeGGList();
+  else if (src === 'anidb') renderAniDBList();
   else renderACList();
-  const activeFrame = document.getElementById('pf-plain').style.display !== 'none' ? document.getElementById('pf-plain') : document.getElementById('pf-sb');
-  watchEnd(activeFrame, malId, ep, lang);
+}
+
+function schedulePrefetchOtherSources() {
+  const run = () => {
+    ['anisantch', 'hianime', 'animegg', 'm4uhd'].forEach(src => {
+      if (src !== activeSrc) ensureSourceLoaded(src, true);
+    });
+  };
+  if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 4000 });
+  else setTimeout(run, 2500);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2307,10 +2454,20 @@ function playAnimeGGSrv(srv) { if (!srv?.url) return; loadIframe(srv.url, !!srv.
 // ═══════════════════════════════════════════════════════════
 //  ANISANTCH FETCH & RENDER
 // ═══════════════════════════════════════════════════════════
+// Cached, fetched ONCE per session (previously this huge 15-file JSON
+// database was re-downloaded on every single episode change — the main
+// cause of slow navigation). Now it loads lazily on first need and is
+// reused in-memory for every subsequent episode/tab switch.
+async function loadACRaw() {
+  if (_acCache) return _acCache;
+  if (_acLoadProm) return _acLoadProm;
+  _acLoadProm = Promise.all(JSON_FILES.map(f => fetch(JSON_BASE + f).then(r => r.ok ? r.json() : []).catch(() => [])))
+    .then(res => { _acCache = res.flat(); _acLoadProm = null; return _acCache; });
+  return _acLoadProm;
+}
 async function fetchACEntry(malId, ep, lang) {
   const key = `${malId}/${ep}==${lang}`; const altKey = `${malId}/${ep}==${lang === 'dub' ? 'sub' : 'dub'}`;
-  const res = await Promise.all(JSON_FILES.map(f => fetch(JSON_BASE + f).then(r => r.ok ? r.json() : []).catch(() => [])));
-  const all = res.flat();
+  const all = await loadACRaw();
   return all.find(e => e.mal_id_with_ep_and_stream_type === key) || all.find(e => e.mal_id_with_ep_and_stream_type === altKey) || null;
 }
 function getAllanimeUrl(entry, q) {
@@ -2516,11 +2673,14 @@ function switchSrc(src) {
   } else {
     hlsPanel.style.display = 'none';
     srvList.style.display = ''; // restore grid
-    if (src === 'hianime') { hiRow.classList.add('show'); qRow.style.display = 'none'; renderHiList(); }
-    else if (src === 'm4uhd') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderM4UList(); }
-    else if (src === 'animegg') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAnimeGGList(); }
+    // Lazy-load: each tab's (potentially heavy, multi-file JSON) data is
+    // only fetched the first time it's opened for this episode, then
+    // cached — ensureSourceLoaded() fetches-if-needed and renders.
+    if (src === 'hianime') { hiRow.classList.add('show'); qRow.style.display = 'none'; ensureSourceLoaded('hianime'); }
+    else if (src === 'm4uhd') { hiRow.classList.remove('show'); qRow.style.display = 'none'; ensureSourceLoaded('m4uhd'); }
+    else if (src === 'animegg') { hiRow.classList.remove('show'); qRow.style.display = 'none'; ensureSourceLoaded('animegg'); }
     else if (src === 'anidb') { hiRow.classList.remove('show'); qRow.style.display = 'none'; renderAniDBList(); }
-    else { hiRow.classList.remove('show'); qRow.style.display = ''; renderACList(); }
+    else { hiRow.classList.remove('show'); qRow.style.display = ''; ensureSourceLoaded('anisantch'); }
   }
 }
 
