@@ -295,6 +295,8 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
 .skip-btn { display: flex; align-items: center; gap: 6px; padding: 9px 16px; border-radius: 20px; border: 1px solid rgba(255,255,255,.2); background: rgba(0,0,0,.8); backdrop-filter: blur(8px); color: #fff; font-size: 12px; font-weight: 700; cursor: pointer; transition: all .2s; }
 .skip-btn:hover { background: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
 .skip-timer { font-size: 10px; opacity: .7; }
+.auto-skip-toast { cursor: default; border-color: rgba(52,211,153,.4); background: rgba(16,20,17,.9); color: var(--green); }
+.auto-skip-toast:hover { background: rgba(16,20,17,.9); border-color: rgba(52,211,153,.4); transform: none; }
 
 /* AUTO NEXT OVERLAY */
 #an-overlay { position: absolute; inset: 0; z-index: 20; background: rgba(7,7,13,.92); backdrop-filter: blur(10px); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
@@ -772,6 +774,10 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
         </button>
         <span class="an-label">Auto-next</span>
         <label class="switch-sm"><input type="checkbox" id="chk-an" checked><span class="slider-sm"></span></label>
+        <span class="an-label">Auto-skip</span>
+        <label class="switch-sm" title="Automatically skip intro/outro when AniSkip has data for this episode">
+          <input type="checkbox" id="chk-autoskip" onchange="toggleAutoSkip()"><span class="slider-sm"></span>
+        </label>
       </div>
     </div>
 
@@ -999,6 +1005,9 @@ let _acLoadProm     = null;
 let _srcLoadedKey   = { anisantch: null, hianime: null, animegg: null, m4uhd: null };
 let _idlePrefetchDone = false;
 let skipTimes       = { op: null, ed: null };
+// Auto-skip preference persists across sessions (this file is a standalone
+// page, not a sandboxed Claude artifact, so localStorage is safe to use here).
+let autoSkipEnabled = localStorage.getItem('autoSkipEnabled') === '1';
 let skipFakeTime    = 0;
 let skipFakeTimer   = null;
 
@@ -2093,15 +2102,44 @@ function startSkipFakeClock() {
   skipFakeTimer = setInterval(() => {
     skipFakeTime++; const t = skipFakeTime;
     const opBtn = document.getElementById('skip-op-btn'); const edBtn = document.getElementById('skip-ed-btn'); let anyVisible = false;
-    if (skipTimes.op && t >= skipTimes.op.start - 2 && t < skipTimes.op.end) { const rem = Math.max(0, Math.round(skipTimes.op.end - t)); opBtn.style.display = ''; document.getElementById('skip-op-timer').textContent = rem > 0 ? rem + 's' : ''; anyVisible = true; } else opBtn.style.display = 'none';
-    if (skipTimes.ed && t >= skipTimes.ed.start - 2 && t < skipTimes.ed.end) { const rem = Math.max(0, Math.round(skipTimes.ed.end - t)); edBtn.style.display = ''; document.getElementById('skip-ed-timer').textContent = rem > 0 ? rem + 's' : ''; anyVisible = true; } else edBtn.style.display = 'none';
+    if (skipTimes.op && t >= skipTimes.op.start - 2 && t < skipTimes.op.end) {
+      if (autoSkipEnabled && t >= skipTimes.op.start) { skipIntro(true); return; }
+      const rem = Math.max(0, Math.round(skipTimes.op.end - t)); opBtn.style.display = ''; document.getElementById('skip-op-timer').textContent = rem > 0 ? rem + 's' : ''; anyVisible = true;
+    } else opBtn.style.display = 'none';
+    if (skipTimes.ed && t >= skipTimes.ed.start - 2 && t < skipTimes.ed.end) {
+      if (autoSkipEnabled && t >= skipTimes.ed.start) { skipOutro(true); return; }
+      const rem = Math.max(0, Math.round(skipTimes.ed.end - t)); edBtn.style.display = ''; document.getElementById('skip-ed-timer').textContent = rem > 0 ? rem + 's' : ''; anyVisible = true;
+    } else edBtn.style.display = 'none';
     document.getElementById('skip-bar').classList.toggle('show', anyVisible);
   }, 1000);
 }
 function stopSkipFakeClock() { if (skipFakeTimer) { clearInterval(skipFakeTimer); skipFakeTimer = null; } skipFakeTime = 0; }
-function skipIntro() { if (!skipTimes.op) return; skipFakeTime = Math.ceil(skipTimes.op.end) + 1; document.getElementById('skip-op-btn').style.display = 'none'; document.getElementById('skip-bar').classList.remove('show'); trySeekFrame(skipTimes.op.end); }
-function skipOutro() { if (!skipTimes.ed) return; skipFakeTime = Math.ceil(skipTimes.ed.end) + 1; document.getElementById('skip-ed-btn').style.display = 'none'; document.getElementById('skip-bar').classList.remove('show'); trySeekFrame(skipTimes.ed.end); }
+function skipIntro(auto) { if (!skipTimes.op) return; skipFakeTime = Math.ceil(skipTimes.op.end) + 1; document.getElementById('skip-op-btn').style.display = 'none'; document.getElementById('skip-bar').classList.remove('show'); trySeekFrame(skipTimes.op.end); if (auto) flashAutoSkipToast('Intro'); }
+function skipOutro(auto) { if (!skipTimes.ed) return; skipFakeTime = Math.ceil(skipTimes.ed.end) + 1; document.getElementById('skip-ed-btn').style.display = 'none'; document.getElementById('skip-bar').classList.remove('show'); trySeekFrame(skipTimes.ed.end); if (auto) flashAutoSkipToast('Outro'); }
 function trySeekFrame(t) { const frames = [document.getElementById('pf-plain'), document.getElementById('pf-sb'), document.getElementById('pf-adblock')]; const active = frames.find(f => f.style.display !== 'none'); if (active) { try { active.contentWindow.postMessage({ action: 'seekTo', time: t }, '*'); } catch {} } }
+
+// Toggle for the Auto-Skip switch in the player top bar. When on, AniSkip
+// intro/outro windows are skipped automatically the moment they're reached —
+// no click needed. Preference is remembered for next time.
+function toggleAutoSkip() {
+  autoSkipEnabled = document.getElementById('chk-autoskip').checked;
+  localStorage.setItem('autoSkipEnabled', autoSkipEnabled ? '1' : '0');
+}
+
+// Brief, non-interactive confirmation shown in the skip-bar area right after
+// an automatic skip happens, so it's clear something just happened.
+function flashAutoSkipToast(label) {
+  const bar = document.getElementById('skip-bar');
+  bar.querySelectorAll('.auto-skip-toast').forEach(el => el.remove());
+  const toast = document.createElement('div');
+  toast.className = 'skip-btn auto-skip-toast';
+  toast.style.opacity = '1'; toast.style.transition = 'opacity .4s ease';
+  toast.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="5 4 15 12 5 20"/><line x1="19" y1="4" x2="19" y2="20"/></svg> ${label} auto-skipped`;
+  bar.appendChild(toast);
+  bar.classList.add('show');
+  setTimeout(() => { toast.style.opacity = '0'; }, 1300);
+  setTimeout(() => { toast.remove(); if (!bar.querySelector('.skip-btn')) bar.classList.remove('show'); }, 1800);
+}
 
 // ═══════════════════════════════════════════════════════════
 //  HOME INIT & RENDER
@@ -2920,6 +2958,8 @@ function updateSrcTabOpacity() {
 // ═══════════════════════════════════════════════════════════
 //  INIT
 // ═══════════════════════════════════════════════════════════
+const _chkAutoSkip = document.getElementById('chk-autoskip');
+if (_chkAutoSkip) _chkAutoSkip.checked = autoSkipEnabled;
 initHome();
 </script>
 </body>
