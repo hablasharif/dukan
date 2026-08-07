@@ -6,6 +6,13 @@
 <title>AnimeStreamX — Stream Anime Free</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- Warm up connections to the APIs the home page hits immediately, so the
+     TLS/DNS handshake is already done by the time the first fetch fires -->
+<link rel="preconnect" href="https://graphql.anilist.co">
+<link rel="preconnect" href="https://api.jikan.moe" crossorigin>
+<link rel="preconnect" href="https://megaplay.buzz">
+<link rel="dns-prefetch" href="https://raw.githubusercontent.com">
+<link rel="dns-prefetch" href="https://api.myanimelist.net">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 
@@ -602,7 +609,19 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
   #hls-panel > div[style*="display:flex"] { flex-wrap: wrap; }
   #stb-grid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
   #stb-query-text { font-size: 12px; }
+  #player-topbar { padding: 0 10px; gap: 6px; }
+  #back-btn { padding: 6px 8px; }
+  .ep-nav-btn, #ep-picker-btn { padding: 5px 7px; }
+  #player-ep-label { display: none; }
 }
+
+/* Extremely narrow phones: keep icons, drop button text labels */
+@media (max-width: 400px) {
+  .btn-label { display: none; }
+  #back-btn, .ep-nav-btn { gap: 0; padding: 6px; }
+  #player-show-title { max-width: 88px; }
+}
+
 
 /* Let flex-basis inputs actually shrink instead of overflowing on narrow screens */
 #search-inp, #hls-url-inp, #hls-ref-inp, #hls-ori-inp, #anidb-manual-inp, #em-ep-search {
@@ -736,7 +755,7 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
     <div id="player-topbar">
       <button id="back-btn" onclick="goHome()">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-        Back
+        <span class="btn-label">Back</span>
       </button>
       <div id="player-show-title">—</div>
       <div id="player-ep-label">—</div>
@@ -746,9 +765,9 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
           <button id="pl-sub" onclick="playerSetLang('sub')">SUB</button>
         </div>
         <button class="ep-nav-btn" onclick="playerPrev()">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>Prev
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg><span class="btn-label">Prev</span>
         </button>
-        <button class="ep-nav-btn" onclick="playerNext()">Next
+        <button class="ep-nav-btn" onclick="playerNext()"><span class="btn-label">Next</span>
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
         <span class="an-label">Auto-next</span>
@@ -1066,11 +1085,20 @@ async function getAnimeDetailsMAL(malId) {
   if (!d) return null; return normalizeAnime(d.data || d);
 }
 
-// Fetch related/sequel anime via Jikan — includes full info (images, score, episodes)
+// Fetch related/sequel anime via Jikan — includes full info (images, score, episodes).
+// Cached per malId (relations don't change during a session) and fetched in small
+// parallel batches instead of one-at-a-time, which is what made this panel slow.
+const _relatedCache = {};
+function fetchWithTimeout(url, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(t));
+}
 async function getRelatedAnime(malId) {
+  if (_relatedCache[malId]) return _relatedCache[malId];
   try {
-    const r = await fetch(`${JIKAN_BASE}/anime/${malId}/relations`);
-    if (!r.ok) return [];
+    const r = await fetchWithTimeout(`${JIKAN_BASE}/anime/${malId}/relations`, 8000);
+    if (!r.ok) { _relatedCache[malId] = []; return []; }
     const data = await r.json();
     const entries = data?.data || [];
     const stubs = [];
@@ -1084,28 +1112,26 @@ async function getRelatedAnime(malId) {
         }
       }
     }
-    if (!stubs.length) return [];
-    // Fetch full info (images, score, episodes) for each stub
+    if (!stubs.length) { _relatedCache[malId] = []; return []; }
+    // Fetch full info (images, score, episodes) in small parallel batches —
+    // much faster than the old fully-sequential 250ms-per-item loop, while
+    // still staying comfortably under Jikan's public rate limit.
+    const targets = stubs.slice(0, 8);
     const full = [];
-    for (const stub of stubs.slice(0, 8)) {
-      try {
-        await new Promise(res => setTimeout(res, 250)); // respect Jikan rate-limit
-        const ri = await fetch(`${JIKAN_BASE}/anime/${stub.mal_id}`);
-        if (ri.ok) {
-          const di = await ri.json();
-          if (di.data) {
-            full.push({ ...normalizeAnime(di.data), relation: stub.relation });
-          } else {
-            // fallback: use stub with placeholder image
-            full.push({ ...stub, images: stub.images || { jpg: { image_url: '', large_image_url: '' } } });
-          }
-        } else {
-          full.push({ ...stub, images: stub.images || { jpg: { image_url: '', large_image_url: '' } } });
-        }
-      } catch {
-        full.push({ ...stub, images: stub.images || { jpg: { image_url: '', large_image_url: '' } } });
-      }
+    const BATCH = 3;
+    for (let i = 0; i < targets.length; i += BATCH) {
+      const batch = targets.slice(i, i + BATCH);
+      const results = await Promise.all(batch.map(stub =>
+        fetchWithTimeout(`${JIKAN_BASE}/anime/${stub.mal_id}`, 6000)
+          .then(ri => ri.ok ? ri.json() : null).catch(() => null)
+          .then(di => di?.data
+            ? { ...normalizeAnime(di.data), relation: stub.relation }
+            : { ...stub, images: stub.images || { jpg: { image_url: '', large_image_url: '' } } })
+      ));
+      full.push(...results);
+      if (i + BATCH < targets.length) await new Promise(res => setTimeout(res, 300));
     }
+    _relatedCache[malId] = full;
     return full;
   } catch { return []; }
 }
@@ -1256,12 +1282,16 @@ const RELATION_LABELS = {
   'Parent Story': '▲ Main Story'
 };
 
+let _nextSeriesToken = 0;
 async function loadNextSeriesPanel(malId) {
   const inner = document.getElementById('next-panel-inner');
+  const myToken = ++_nextSeriesToken; // guards against a slower, older request
+                                       // overwriting a newer series' panel
   inner.innerHTML = '<div id="next-loading"><div class="spin-sm"></div><span>Finding related series…</span></div>';
 
   try {
     const related = await getRelatedAnime(malId);
+    if (myToken !== _nextSeriesToken) return; // a different anime was opened meanwhile — discard
     if (!related.length) {
       inner.innerHTML = '<div style="font-size:12px;color:var(--text2);padding:16px 0">No related series found for this anime.</div>';
       return;
@@ -1325,6 +1355,7 @@ async function loadNextSeriesPanel(malId) {
       }
     }
   } catch (e) {
+    if (myToken !== _nextSeriesToken) return; // stale — a newer anime is already showing
     inner.innerHTML = '<div style="font-size:12px;color:var(--text2);padding:16px 0">Could not load related series.</div>';
   }
 }
@@ -2076,8 +2107,28 @@ function trySeekFrame(t) { const frames = [document.getElementById('pf-plain'), 
 //  HOME INIT & RENDER
 // ═══════════════════════════════════════════════════════════
 async function initHome() {
-  loadAnimeList().catch(() => {}); loadM4USeries().catch(() => {}); loadM4UMovies().catch(() => {}); loadAnimeGG().catch(() => {});
+  // Only what the home page actually needs to paint — hero, airing,
+  // top, and popular all use small/fast AniList or Jikan calls.
   loadHero(); loadAiringRow(); loadTopRow(); loadPopularGrid();
+
+  // Everything below is only needed once someone opens the player
+  // (M4UHD tab, AnimeGG tab, AniDB MAL→AniList matching) — previously
+  // these 4 heavy multi-file JSON databases were downloaded on every
+  // single page load before the home page even finished painting.
+  // Warming them in idle time keeps the home page fast while still
+  // having them ready in the background by the time they're needed.
+  schedulePrefetchHomeExtras();
+}
+
+function schedulePrefetchHomeExtras() {
+  const run = () => {
+    loadAnimeList().catch(() => {});
+    loadM4USeries().catch(() => {});
+    loadM4UMovies().catch(() => {});
+    loadAnimeGG().catch(() => {});
+  };
+  if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 6000 });
+  else setTimeout(run, 3000);
 }
 
 async function loadHero() {
