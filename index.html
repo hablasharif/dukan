@@ -870,9 +870,9 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
 
           <!-- HLS / M3U8 Player Panel -->
           <div id="hls-panel" style="display:none;flex-direction:column;gap:12px;">
-            <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.06em;">📡 Advanced HLS / M3U8 Player</div>
+            <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.06em;">📡 Advanced HLS / M3U8 / TXT Player</div>
             <div style="display:flex;gap:8px;align-items:stretch;">
-              <input id="hls-url-inp" type="text" placeholder="Paste .m3u8, HLS, or anidb.app/embed/ link… (auto-filled from AniDB)"
+              <input id="hls-url-inp" type="text" placeholder="Paste .m3u8, .txt, HLS, IPTV playlist, or anidb.app/embed/ link… (auto-filled from AniDB)"
                 style="flex:1;min-width:0;padding:9px 14px;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);font-size:12.5px;outline:none;transition:border-color .2s;"
                 onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'"
                 oninput="this.dataset.userEdited='1'"
@@ -888,8 +888,10 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
                 onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'">
             </div>
             <div id="hls-status" style="font-size:11px;color:var(--text3);min-height:16px;"></div>
+            <div id="hls-quality-row" style="display:none;gap:6px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--text2);"></div>
+            <div id="hls-channel-list" style="display:none;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:8px;"></div>
             <div style="font-size:10.5px;color:var(--text3);line-height:1.6;background:var(--bg3);border-radius:8px;padding:8px 12px;border:1px solid var(--border);">
-              <b style="color:var(--accent2)">AniDB streams</b> (hls.anidb.app/… or anidb.app/embed/…) are automatically routed through the AniDB proxy — no extra setup needed. For all other HLS links, set Referer/Origin above if required by the source.
+              <b style="color:var(--accent2)">AniDB streams</b> (hls.anidb.app/… or anidb.app/embed/…) are automatically routed through the AniDB proxy — no extra setup needed. Any other link is auto-sniffed: real <b style="color:var(--accent2)">.m3u8</b> streams, <b style="color:var(--accent2)">.txt</b> files disguised as playlists, and multi-channel IPTV lists are all detected automatically, regardless of file extension. Set Referer/Origin above if the source requires them.
             </div>
           </div>
         </div>
@@ -2796,7 +2798,7 @@ function switchSrc(src) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  HLS / M3U8 ADVANCED PLAYER
+//  HLS / M3U8 / TXT ADVANCED PLAYER
 // ═══════════════════════════════════════════════════════════
 let _hlsInstance = null;
 
@@ -2815,31 +2817,271 @@ function anidbProxyUrl(rawUrl) {
 }
 // ────────────────────────────────────────────────────────────
 
-function playHLS() {
-  const url = document.getElementById('hls-url-inp').value.trim();
+// Tuned hls.js config shared by every playback path — favors fast start
+// (auto quality, generous retry budget) and low memory footprint
+// (bounded back-buffer) so long marathon sessions stay smooth.
+function buildHlsConfig(extra) {
+  return Object.assign({
+    enableWorker: true,
+    lowLatencyMode: true,
+    backBufferLength: 30,          // evict old buffered video to save memory
+    maxBufferLength: 30,
+    maxMaxBufferLength: 60,
+    maxBufferSize: 60 * 1000 * 1000,
+    maxBufferHole: 0.5,
+    startLevel: -1,                 // auto-pick initial quality
+    abrEwmaFastLive: 3,
+    abrEwmaSlowLive: 9,
+    manifestLoadingTimeOut: 15000,
+    manifestLoadingMaxRetry: 4,
+    manifestLoadingRetryDelay: 600,
+    levelLoadingTimeOut: 15000,
+    levelLoadingMaxRetry: 4,
+    levelLoadingRetryDelay: 600,
+    fragLoadingTimeOut: 25000,
+    fragLoadingMaxRetry: 6,
+    fragLoadingRetryDelay: 500,
+  }, extra || {});
+}
+
+// Auto-recovering error handler: retries network hiccups with backoff,
+// recovers media errors in place, and only gives up (falling back to a
+// plain <video src> as last resort) after repeated failures.
+function attachHlsErrorRecovery(hls, videoEl, statusEl, opts) {
+  opts = opts || {};
+  let netRetries = 0, mediaRetries = 0;
+  hls.on(Hls.Events.ERROR, (event, data) => {
+    if (!data || !data.fatal) return; // non-fatal glitches are routine, ignore quietly
+    switch (data.type) {
+      case Hls.ErrorTypes.NETWORK_ERROR:
+        if (netRetries < 4) {
+          netRetries++;
+          statusEl.textContent = `⚠ Network hiccup — retrying (${netRetries}/4)…`;
+          setTimeout(() => { try { hls.startLoad(); } catch(_) {} }, 600 * netRetries);
+        } else {
+          statusEl.style.color = '#f87171';
+          statusEl.textContent = `✗ Network error: ${data.details}`;
+          if (opts.onFatal) opts.onFatal(data);
+        }
+        break;
+      case Hls.ErrorTypes.MEDIA_ERROR:
+        if (mediaRetries < 3) {
+          mediaRetries++;
+          statusEl.textContent = `⚠ Playback hiccup — recovering (${mediaRetries}/3)…`;
+          try { hls.recoverMediaError(); } catch(_) {}
+        } else {
+          statusEl.style.color = '#f87171';
+          statusEl.textContent = `✗ Media error: ${data.details}`;
+          if (opts.onFatal) opts.onFatal(data);
+        }
+        break;
+      default:
+        statusEl.style.color = '#f87171';
+        statusEl.textContent = `✗ Fatal error: ${data.details}`;
+        try { hls.destroy(); } catch(_) {}
+        if (opts.onFatal) opts.onFatal(data);
+    }
+  });
+}
+
+// Shows a manual quality picker (Auto + each rendition) once levels are known
+function buildHlsQualityUI(hls, levels) {
+  const row = document.getElementById('hls-quality-row');
+  if (!row) return;
+  if (!levels || levels.length <= 1) { row.style.display = 'none'; row.innerHTML = ''; return; }
+  row.style.display = 'flex';
+  row.innerHTML = '';
+  const label = document.createElement('span');
+  label.textContent = 'QUALITY';
+  label.style.cssText = 'color:var(--text3);font-weight:700;letter-spacing:.05em;';
+  row.appendChild(label);
+  const mkBtn = (text, level, active) => {
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.style.cssText = `padding:3px 10px;border-radius:6px;border:1px solid ${active ? 'var(--accent)' : 'var(--border2)'};background:var(--bg4);color:${active ? 'var(--text)' : 'var(--text2)'};font-size:11px;cursor:pointer;`;
+    b.onclick = () => {
+      hls.currentLevel = level;
+      row.querySelectorAll('button').forEach(x => { x.style.borderColor = 'var(--border2)'; x.style.color = 'var(--text2)'; });
+      b.style.borderColor = 'var(--accent)'; b.style.color = 'var(--text)';
+    };
+    return b;
+  };
+  row.appendChild(mkBtn('Auto', -1, true));
+  levels.forEach((l, i) => row.appendChild(mkBtn(l.height ? l.height + 'p' : Math.round((l.bitrate||0)/1000) + 'kb/s', i, false)));
+}
+
+// Shows "⏳ Buffering…" while the player stalls, restores the previous
+// status text once playback resumes — cheap perceived-performance win.
+function attachBufferIndicator(videoEl, statusEl) {
+  let saved = '';
+  videoEl.addEventListener('waiting', () => { saved = statusEl.textContent; statusEl.textContent = '⏳ Buffering…'; });
+  videoEl.addEventListener('playing', () => { if (statusEl.textContent === '⏳ Buffering…') statusEl.textContent = saved || '✓ Playing'; });
+}
+
+// Parses an M3U/M3U8 body into a flat channel list: [{name, url}, …]
+// Handles both bare and #EXTINF-labelled entries, relative segment paths.
+function parseM3UChannels(text, baseUrl) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let pendingName = null;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith('#EXTINF')) {
+      const m = line.match(/,(.*)$/);
+      pendingName = m ? m[1].trim() : null;
+    } else if (line.startsWith('#')) {
+      continue;
+    } else {
+      let u = line;
+      try { u = new URL(line, baseUrl).href; } catch (_) {}
+      out.push({ name: pendingName || u, url: u });
+      pendingName = null;
+    }
+  }
+  return out;
+}
+
+// ── Universal stream resolver ─────────────────────────────────
+// Figures out what a pasted link actually is, independent of its file
+// extension — this is what lets ".txt" links that are secretly HLS
+// playlists (or IPTV channel lists) work exactly like real ".m3u8" links.
+//   1. Obvious non-HLS containers (.mp4/.webm/…) → play directly, no sniff.
+//   2. Otherwise fetch a slice of the body and read the actual content:
+//      - "#EXTM3U" + stream tags (#EXT-X-STREAM-INF / TARGETDURATION / …)
+//        → it's a real HLS playlist, hand the URL straight to hls.js.
+//      - "#EXTM3U" + multiple #EXTINF entries → it's a channel/IPTV list,
+//        parsed into individual channels for the user to pick from.
+//      - Plain text containing just a bare URL → unwrap and recurse.
+//   3. If the fetch is CORS-blocked, fall back to extension/keyword
+//      heuristics so playback is still attempted rather than blocked.
+async function resolveStreamUrl(url, _depth) {
+  _depth = _depth || 0;
+  if (_depth > 3) return { type: 'hls', url };
+
+  const lower = url.split('?')[0].toLowerCase();
+  if (/\.(mp4|webm|mkv|mov|avi|flv)$/.test(lower)) return { type: 'direct', url };
+  if (isAniDBStream(url)) return { type: 'hls', url }; // proxy fetches this itself
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    const resp = await fetch(url, { signal: ctrl.signal, mode: 'cors' });
+    clearTimeout(timer);
+    if (resp.ok) {
+      const text = (await resp.text()).slice(0, 200000).trim();
+      if (/^#EXTM3U/i.test(text)) {
+        if (/#EXT-X-STREAM-INF|#EXT-X-TARGETDURATION|#EXT-X-KEY|#EXT-X-MEDIA-SEQUENCE/i.test(text)) {
+          return { type: 'hls', url }; // real HLS master/media playlist
+        }
+        const channels = parseM3UChannels(text, url);
+        if (channels.length > 1) return { type: 'channels', list: channels };
+        if (channels.length === 1) return await resolveStreamUrl(channels[0].url, _depth + 1);
+        return { type: 'hls', url };
+      }
+      const firstLine = text.split(/\r?\n/)[0].trim();
+      if (/^https?:\/\//i.test(firstLine) && firstLine !== url) {
+        return await resolveStreamUrl(firstLine, _depth + 1); // .txt holding a bare link
+      }
+    }
+  } catch (_) { /* CORS-blocked or offline — fall through to heuristics */ }
+
+  const looksHls = /\.m3u8?($|\?)/.test(lower) || /\.txt($|\?)/.test(lower) || /\/hls\//.test(lower) || /playlist|m3u8/i.test(url);
+  return { type: looksHls ? 'hls' : 'direct', url };
+}
+
+// Renders the multi-channel picker when a .txt/.m3u8 turns out to be an
+// IPTV-style channel list rather than a single playable stream.
+function renderHlsChannelPicker(list, videoEl, statusEl, referer, origin) {
+  const chList = document.getElementById('hls-channel-list');
+  if (!chList) return;
+  chList.style.display = 'flex';
+  chList.innerHTML = '';
+  list.slice(0, 500).forEach(ch => {
+    const btn = document.createElement('button');
+    btn.textContent = ch.name || ch.url;
+    btn.title = ch.url;
+    btn.style.cssText = 'text-align:left;padding:6px 10px;border-radius:6px;border:1px solid var(--border2);background:var(--bg4);color:var(--text2);font-size:12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    btn.onmouseenter = () => btn.style.borderColor = 'var(--accent)';
+    btn.onmouseleave = () => btn.style.borderColor = 'var(--border2)';
+    btn.onclick = async () => {
+      document.getElementById('hls-url-inp').value = ch.url;
+      statusEl.style.color = 'var(--text3)'; statusEl.textContent = `⏳ Loading "${ch.name}"…`;
+      if (_hlsInstance) { try { _hlsInstance.destroy(); } catch (_) {} _hlsInstance = null; }
+      let resolved;
+      try { resolved = await resolveStreamUrl(ch.url); } catch (_) { resolved = { type: 'hls', url: ch.url }; }
+      const useProxy = isAniDBStream(resolved.url);
+      if (resolved.type === 'hls' && typeof Hls !== 'undefined' && Hls.isSupported()) {
+        loadHlsStream(resolved.url, referer, origin, useProxy, videoEl, statusEl);
+      } else {
+        videoEl.src = useProxy ? anidbProxyUrl(resolved.url) : resolved.url;
+        videoEl.play().catch(() => {});
+        statusEl.style.color = 'var(--text2)'; statusEl.textContent = `▶ Playing "${ch.name}"`;
+      }
+    };
+    chList.appendChild(btn);
+  });
+}
+
+// Attaches hls.js to videoEl and starts loading a confirmed HLS URL,
+// wiring up quality UI, buffering indicator, and error recovery.
+function loadHlsStream(url, referer, origin, useAniDBProxy, videoEl, statusEl) {
+  const xhrSetup = (xhr, reqUrl) => {
+    if (useAniDBProxy) {
+      if (!reqUrl.startsWith(ANIDB_PROXY)) xhr.open('GET', anidbProxyUrl(reqUrl), true);
+      return;
+    }
+    if (referer) { try { xhr.setRequestHeader('Referer', referer); } catch (_) {} }
+    if (origin)  { try { xhr.setRequestHeader('Origin', origin); } catch (_) {} }
+  };
+  const hls = new Hls(buildHlsConfig({ xhrSetup }));
+  _hlsInstance = hls;
+  hls.loadSource(useAniDBProxy ? anidbProxyUrl(url) : url);
+  hls.attachMedia(videoEl);
+  hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+    statusEl.style.color = 'var(--green)';
+    const levels = data.levels || [];
+    const qs = levels.length > 1 ? ` — ${levels.length} levels: ${levels.map(l => (l.height || '?') + 'p').join(', ')}` : '';
+    statusEl.textContent = `✓ Stream loaded${useAniDBProxy ? ' via AniDB proxy' : ''}${qs}`;
+    buildHlsQualityUI(hls, levels);
+    videoEl.play().catch(() => {});
+  });
+  attachBufferIndicator(videoEl, statusEl);
+  attachHlsErrorRecovery(hls, videoEl, statusEl, {
+    onFatal: () => {
+      try { hls.destroy(); } catch (_) {}
+      _hlsInstance = null;
+      videoEl.src = useAniDBProxy ? anidbProxyUrl(url) : url;
+      videoEl.play().catch(() => {});
+    }
+  });
+}
+
+async function playHLS() {
+  const rawUrl = document.getElementById('hls-url-inp').value.trim();
   const referer = document.getElementById('hls-ref-inp').value.trim();
   const origin  = document.getElementById('hls-ori-inp').value.trim();
   const statusEl = document.getElementById('hls-status');
   const ph = document.getElementById('player-ph');
+  const chList = document.getElementById('hls-channel-list');
+  const qRow = document.getElementById('hls-quality-row');
+  if (chList) { chList.style.display = 'none'; chList.innerHTML = ''; }
+  if (qRow) { qRow.style.display = 'none'; qRow.innerHTML = ''; }
 
-  if (!url) { statusEl.style.color = 'var(--orange)'; statusEl.textContent = '⚠ Please enter an HLS / M3U8 or embed URL.'; return; }
-  statusEl.style.color = 'var(--text3)'; statusEl.textContent = '⏳ Loading stream…';
+  if (!rawUrl) { statusEl.style.color = 'var(--orange)'; statusEl.textContent = '⚠ Please enter an HLS / M3U8 / TXT playlist or embed URL.'; return; }
+  statusEl.style.color = 'var(--text3)'; statusEl.textContent = '⏳ Resolving stream…';
 
-  // Destroy previous hls instance
   if (_hlsInstance) { try { _hlsInstance.destroy(); } catch (_) {} _hlsInstance = null; }
 
-  // Hide all iframes & existing video
   ['pf-plain','pf-sb','pf-adblock'].forEach(id => {
-    const f = document.getElementById(id); f.style.display = 'none'; try { f.src = 'about:blank'; } catch(_) {}
+    const f = document.getElementById(id); f.style.display = 'none'; try { f.src = 'about:blank'; } catch (_) {}
   });
   ph.style.display = 'none';
 
-  // ── Case 1: AniDB embed URL → route through proxy inside iframe ──
-  if (isAniDBEmbed(url)) {
-    // Hide video, show hls-iframe
+  // ── AniDB embed URL → route through proxy inside iframe ──
+  if (isAniDBEmbed(rawUrl)) {
     const hv = document.getElementById('hls-video-el');
-    if (hv) { hv.style.display = 'none'; try { hv.pause(); } catch(_){} }
-
+    if (hv) { hv.style.display = 'none'; try { hv.pause(); } catch (_) {} }
     let ifrEl = document.getElementById('hls-iframe-el');
     if (!ifrEl) {
       ifrEl = document.createElement('iframe');
@@ -2850,97 +3092,58 @@ function playHLS() {
       document.getElementById('player-main').appendChild(ifrEl);
     }
     ifrEl.style.display = 'block';
-    ifrEl.src = anidbProxyUrl(url);
+    ifrEl.src = anidbProxyUrl(rawUrl);
     statusEl.style.color = 'var(--green)';
     statusEl.textContent = '✓ AniDB embed → playing via proxy iframe';
     return;
   }
 
-  // Hide any proxy iframe
   const existIfr = document.getElementById('hls-iframe-el');
   if (existIfr) { existIfr.style.display = 'none'; existIfr.src = 'about:blank'; }
 
-  // Ensure video element exists
   let videoEl = document.getElementById('hls-video-el');
   if (!videoEl) {
     videoEl = document.createElement('video');
     videoEl.id = 'hls-video-el';
     videoEl.controls = true;
     videoEl.crossOrigin = 'anonymous';
+    videoEl.playsInline = true;
     videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;background:#000;';
     document.getElementById('player-main').appendChild(videoEl);
   }
   videoEl.style.display = 'block';
 
-  const isM3U8 = url.includes('.m3u8') || url.includes('/hls/') || url.includes('playlist');
-  const useAniDBProxy = isAniDBStream(url); // only for hls.anidb.app
-
-  if (typeof Hls !== 'undefined' && Hls.isSupported() && isM3U8) {
-
-    // ── Case 2: AniDB HLS stream → proxy every segment request ──
-    if (useAniDBProxy) {
-      const hls = new Hls({
-        xhrSetup: (xhr, reqUrl) => {
-          // Rewrite every request (manifest + segments) through the worker
-          if (!reqUrl.startsWith(ANIDB_PROXY)) {
-            xhr.open('GET', anidbProxyUrl(reqUrl), true);
-          }
-        },
-        enableWorker: true,
-        lowLatencyMode: false
-      });
-      _hlsInstance = hls;
-      // Load the manifest through the proxy too
-      hls.loadSource(anidbProxyUrl(url));
-      hls.attachMedia(videoEl);
-      hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-        statusEl.style.color = 'var(--green)';
-        const levels = data.levels || [];
-        const qs = levels.length > 1 ? ` — ${levels.length} levels: ${levels.map(l => (l.height || '?') + 'p').join(', ')}` : '';
-        statusEl.textContent = `✓ AniDB HLS playing via proxy${qs}`;
-        videoEl.play().catch(() => {});
-      });
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data.fatal) { statusEl.style.color = '#f87171'; statusEl.textContent = `✗ HLS Error: ${data.details}`; }
-      });
-
-    // ── Case 3: Generic HLS stream → use referer/origin headers if provided ──
-    } else {
-      const xhrSetup = (xhr) => {
-        if (referer) xhr.setRequestHeader('Referer', referer);
-        if (origin)  xhr.setRequestHeader('Origin', origin);
-      };
-      const hls = new Hls({ xhrSetup, enableWorker: true, lowLatencyMode: false });
-      _hlsInstance = hls;
-      hls.loadSource(url);
-      hls.attachMedia(videoEl);
-      hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-        statusEl.style.color = 'var(--green)';
-        const levels = data.levels || [];
-        if (levels.length > 1) {
-          statusEl.textContent = `✓ Stream loaded — ${levels.length} quality levels: ${levels.map(l => (l.height || '?') + 'p').join(', ')}`;
-        } else {
-          statusEl.textContent = '✓ Stream loaded successfully';
-        }
-        videoEl.play().catch(() => {});
-      });
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data.fatal) { statusEl.style.color = '#f87171'; statusEl.textContent = `✗ Stream error: ${data.type} — ${data.details}`; }
-      });
+  ensureHlsJS(async () => {
+    let resolved;
+    try {
+      resolved = await resolveStreamUrl(rawUrl);
+    } catch (_) {
+      resolved = { type: 'direct', url: rawUrl };
     }
 
-  } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-    // Native HLS (Safari) — for AniDB, proxy the src
-    videoEl.src = useAniDBProxy ? anidbProxyUrl(url) : url;
-    videoEl.play().catch(() => {});
-    statusEl.style.color = 'var(--green)';
-    statusEl.textContent = useAniDBProxy ? '✓ AniDB HLS → native proxy playback' : '✓ Using native HLS playback';
-  } else {
-    // Direct source fallback
-    videoEl.src = useAniDBProxy ? anidbProxyUrl(url) : url;
-    videoEl.play().catch(() => {});
-    statusEl.style.color = 'var(--text2)'; statusEl.textContent = '▶ Playing direct stream';
-  }
+    if (resolved.type === 'channels') {
+      renderHlsChannelPicker(resolved.list, videoEl, statusEl, referer, origin);
+      statusEl.style.color = 'var(--accent2)';
+      statusEl.textContent = `📋 Found ${resolved.list.length} channels — pick one below to play`;
+      return;
+    }
+
+    const finalUrl = resolved.url;
+    const useAniDBProxy = isAniDBStream(finalUrl);
+
+    if (resolved.type === 'hls' && typeof Hls !== 'undefined' && Hls.isSupported()) {
+      loadHlsStream(finalUrl, referer, origin, useAniDBProxy, videoEl, statusEl);
+    } else if (resolved.type === 'hls' && videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+      videoEl.src = useAniDBProxy ? anidbProxyUrl(finalUrl) : finalUrl;
+      videoEl.play().catch(() => {});
+      statusEl.style.color = 'var(--green)';
+      statusEl.textContent = useAniDBProxy ? '✓ AniDB HLS → native proxy playback' : '✓ Using native HLS playback';
+    } else {
+      videoEl.src = useAniDBProxy ? anidbProxyUrl(finalUrl) : finalUrl;
+      videoEl.play().catch(() => {});
+      statusEl.style.color = 'var(--text2)'; statusEl.textContent = '▶ Playing direct stream';
+    }
+  });
 }
 
 // Load hls.js dynamically only when needed
@@ -2951,10 +3154,6 @@ function ensureHlsJS(cb) {
   s.onload = cb; s.onerror = cb;
   document.head.appendChild(s);
 }
-
-// Override playHLS to ensure hls.js is loaded first
-const _playHLSOrig = playHLS;
-window.playHLS = function() { ensureHlsJS(_playHLSOrig); };
 
 function updateSrcTabOpacity() {
   document.getElementById('tab-ac').style.opacity = serverData.length ? '1' : '0.4';
