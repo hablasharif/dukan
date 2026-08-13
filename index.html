@@ -2529,7 +2529,7 @@ function renderAnimeGGList() {
   document.getElementById('hi-subsrc-row').classList.remove('show'); document.getElementById('srv-loading').classList.remove('show');
   const srvs = [];
   if (playerMalId) {
-    srvs.push({ key: `animeg_ep${playerEp}`, label: '🌸 AnimeG', badge: 'AnimeG', url: `https://ytbro8326-sudo.github.io/animeg_html/?mal=${playerMalId}&ep=${playerEp}&lang=${playerLang}`, source: 'animegg', lang: playerLang, adBlock: true });
+    srvs.push({ key: `animeg_ep${playerEp}`, label: '🌸 AnimeG', badge: 'AnimeG', url: `https://ytbro8326-sudo.github.io/animeg_html/?${playerMalId}/${playerEp}/${playerLang}`, source: 'animegg', lang: playerLang, adBlock: true });
     srvs.push({ key: `flixcloud_ep${playerEp}`, label: '☁️ FlixCloud', badge: 'FlixCloud', url: `https://donkarboy.github.io/flixloud/${playerMalId}/${playerEp}`, source: 'animegg', lang: playerLang, adBlock: true });
   }
   const di = 0;
