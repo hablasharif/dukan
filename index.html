@@ -838,6 +838,7 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
             <button class="src-t"        id="tab-agg"   onclick="switchSrc('animegg')">🌸 AnimeG</button>
             <button class="src-t"        id="tab-anidb" onclick="switchSrc('anidb')">📺 AniDB</button>
             <button class="src-t"        id="tab-m4u"   onclick="switchSrc('m4uhd')">🎬 M4UHD</button>
+            <button class="src-t"        id="tab-mply"  onclick="switchSrc('megaplyhls')">📺 Megaply HLS</button>
             <button class="src-t"        id="tab-hls"   onclick="switchSrc('hlsplayer')">📡 HLS Player</button>
           </div>
           <div id="m4u-status-row"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span id="m4u-status-text">Checking M4UHD library…</span></div>
@@ -866,6 +867,41 @@ iframe { width: 100%; height: 100%; border: none; position: absolute; inset: 0; 
           <div id="skip-info-row">
             <div class="skip-info-title">⏭ Skip Times (AniSkip)</div>
             <div id="skip-info-inner"></div>
+          </div>
+
+          <!-- Megaply HLS Panel -->
+          <div id="megaply-hls-panel" style="display:none;flex-direction:column;gap:12px;">
+            <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.06em;">📺 Megaply HLS Player</div>
+            <div style="display:flex;gap:8px;align-items:stretch;">
+              <input id="mply-url-inp" type="text"
+                placeholder="Auto-filled from anime — or paste a custom HLS / M3U8 URL…"
+                style="flex:1;min-width:0;padding:9px 14px;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;color:var(--text);font-size:12.5px;outline:none;transition:border-color .2s;"
+                onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'"
+                oninput="this.dataset.userEdited='1'"
+                onkeydown="if(event.key==='Enter')playMegaplyHLS()">
+              <button onclick="playMegaplyHLS()" style="padding:9px 16px;border-radius:9px;border:none;background:var(--accent);color:#fff;font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0;white-space:nowrap;">▶ Play</button>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <div style="display:flex;gap:6px;align-items:center;">
+                <span style="font-size:11px;color:var(--text3);font-weight:700;">MAL ID</span>
+                <input id="mply-malid-inp" type="number" min="1" placeholder="MAL ID"
+                  style="width:90px;padding:6px 10px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--text);font-size:12px;outline:none;"
+                  onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'"
+                  oninput="rebuildMegaplyUrl()">
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;">
+                <span style="font-size:11px;color:var(--text3);font-weight:700;">Episode</span>
+                <input id="mply-ep-inp" type="number" min="1" placeholder="Ep"
+                  style="width:70px;padding:6px 10px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--text);font-size:12px;outline:none;"
+                  onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border2)'"
+                  oninput="rebuildMegaplyUrl()">
+              </div>
+            </div>
+            <div id="mply-status" style="font-size:11px;color:var(--text3);min-height:16px;"></div>
+            <div id="mply-quality-row" style="display:none;gap:6px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--text2);"></div>
+            <div style="font-size:10.5px;color:var(--text3);line-height:1.6;background:var(--bg3);border-radius:8px;padding:8px 12px;border:1px solid var(--border);">
+              <b style="color:var(--accent2)">Megaply HLS</b> — When you open an anime from the home page and pick an episode, the MAL ID and episode are filled in automatically. You can also type them manually above or paste any custom HLS / M3U8 URL directly into the URL field.
+            </div>
           </div>
 
           <!-- HLS / M3U8 Player Panel -->
@@ -2422,6 +2458,8 @@ async function loadEpisode(malId, ep, lang) {
   const hlsInp = document.getElementById('hls-url-inp');
   if (hlsInp && hlsInp.dataset.userEdited !== '1') hlsInp.value = '';
   const hlsStatusEl = document.getElementById('hls-status'); if (hlsStatusEl) hlsStatusEl.textContent = '';
+  // Keep Megaply panel inputs in sync with the new episode
+  syncMegaplyPanel(malId, ep);
 
   // ── INSTANT: MegaPlay is the default source. It plays immediately
   // and has zero dependency on any of the JSON databases below — this
@@ -2756,23 +2794,37 @@ function switchSrc(src) {
   document.getElementById('tab-anidb').classList.toggle('active', src === 'anidb');
   document.getElementById('tab-m4u').classList.toggle('active', src === 'm4uhd');
   document.getElementById('tab-hls').classList.toggle('active', src === 'hlsplayer');
+  document.getElementById('tab-mply').classList.toggle('active', src === 'megaplyhls');
   const hiRow = document.getElementById('hi-subsrc-row'); const qRow = document.getElementById('qual-row');
   document.getElementById('m4u-status-row').classList.remove('show'); document.getElementById('agg-status-row').classList.remove('show'); document.getElementById('anidb-status-row').classList.remove('show');
   const ph = document.getElementById('player-ph'); if (ph.querySelector('a')) ph.innerHTML = '<div class="loading-spin"></div>';
   const hlsPanel = document.getElementById('hls-panel');
+  const megaplyPanel = document.getElementById('megaply-hls-panel');
   const srvLoading = document.getElementById('srv-loading');
   const srvList = document.getElementById('srv-list-inner');
   const skipInfo = document.getElementById('skip-info-row');
-  if (src === 'hlsplayer') {
+
+  if (src === 'megaplyhls') {
+    hiRow.classList.remove('show'); qRow.style.display = 'none';
+    srvLoading.style.display = 'none'; srvList.style.display = 'none'; skipInfo.classList.remove('show');
+    hlsPanel.style.display = 'none';
+    megaplyPanel.style.display = 'flex';
+    hideGearBtn();
+    // Auto-fill MAL ID + episode from current player state
+    fillMegaplyInputs();
+    ph.style.display = 'flex';
+    ph.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--text2);text-align:center;padding:24px;max-width:280px"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="var(--accent)" stroke="none"/></svg><div style="font-size:13px;font-weight:700;color:var(--text)">Megaply HLS</div><div style="font-size:11px;line-height:1.6">MAL ID &amp; episode auto-filled — click Play to start</div></div>`;
+  } else if (src === 'hlsplayer') {
     hiRow.classList.remove('show'); qRow.style.display = 'none';
     srvLoading.style.display = 'none'; srvList.style.display = 'none'; skipInfo.classList.remove('show');
     hlsPanel.style.display = 'flex';
+    megaplyPanel.style.display = 'none';
     hideGearBtn();
-    // Show placeholder in player
     ph.style.display = 'flex';
     ph.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--text2);text-align:center;padding:24px;max-width:280px"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="var(--accent)" stroke="none"/></svg><div style="font-size:13px;font-weight:700;color:var(--text)">HLS / M3U8 Player</div><div style="font-size:11px;line-height:1.6">Paste a stream URL below and click Play</div></div>`;
   } else {
     hlsPanel.style.display = 'none';
+    megaplyPanel.style.display = 'none';
     srvList.style.display = ''; // restore grid
     // Lazy-load: each tab's (potentially heavy, multi-file JSON) data is
     // only fetched the first time it's opened for this episode, then
@@ -3143,12 +3195,186 @@ function ensureHlsJS(cb) {
   document.head.appendChild(s);
 }
 
+// ═══════════════════════════════════════════════════════════
+//  MEGAPLY HLS PLAYER
+// ═══════════════════════════════════════════════════════════
+const MEGAPLY_HLS_BASE = 'https://ytbro8326-sudo.github.io/megaplays_html/21/3';
+let _megaplyHlsInstance = null;
+
+// Build the Megaply HLS URL from a MAL ID and episode number.
+// Format: <base>/<malId>/<episode>
+function buildMegaplyUrl(malId, ep) {
+  if (!malId || !ep) return '';
+  return `${MEGAPLY_HLS_BASE}/${malId}/${ep}`;
+}
+
+// Auto-fill the Megaply panel's inputs from current player state
+// whenever the tab is opened for an anime.
+function fillMegaplyInputs() {
+  const urlInp   = document.getElementById('mply-url-inp');
+  const malidInp = document.getElementById('mply-malid-inp');
+  const epInp    = document.getElementById('mply-ep-inp');
+  const statusEl = document.getElementById('mply-status');
+  if (!urlInp || !malidInp || !epInp) return;
+
+  if (playerMalId) {
+    malidInp.value = playerMalId;
+    epInp.value    = playerEp;
+    // Only overwrite URL if the user hasn't typed something custom
+    if (urlInp.dataset.userEdited !== '1') {
+      const url = buildMegaplyUrl(playerMalId, playerEp);
+      urlInp.value = url;
+      if (statusEl) {
+        statusEl.style.color = 'var(--accent2)';
+        statusEl.textContent = `📥 Auto-filled: MAL #${playerMalId} · Episode ${playerEp} — click Play to stream`;
+      }
+    }
+  } else {
+    if (statusEl) {
+      statusEl.style.color = 'var(--text3)';
+      statusEl.textContent = 'Open an anime from the home page or enter a MAL ID and episode above.';
+    }
+  }
+}
+
+// Called whenever MAL ID or episode inputs change — rebuilds the URL field
+// unless the user has edited the URL field directly.
+function rebuildMegaplyUrl() {
+  const urlInp   = document.getElementById('mply-url-inp');
+  const malidInp = document.getElementById('mply-malid-inp');
+  const epInp    = document.getElementById('mply-ep-inp');
+  const statusEl = document.getElementById('mply-status');
+  if (!urlInp || urlInp.dataset.userEdited === '1') return;
+  const malId = parseInt(malidInp.value, 10);
+  const ep    = parseInt(epInp.value, 10);
+  if (malId > 0 && ep > 0) {
+    urlInp.value = buildMegaplyUrl(malId, ep);
+    if (statusEl) {
+      statusEl.style.color = 'var(--accent2)';
+      statusEl.textContent = `MAL #${malId} · Episode ${ep} ready — click Play`;
+    }
+  }
+}
+
+// Play the Megaply HLS stream.
+// Uses hls.js natively if the URL is a direct .m3u8; falls back to
+// an iframe embed for HTML-wrapped players.
+async function playMegaplyHLS() {
+  const urlInp   = document.getElementById('mply-url-inp');
+  const statusEl = document.getElementById('mply-status');
+  const qRow     = document.getElementById('mply-quality-row');
+  const ph       = document.getElementById('player-ph');
+  const rawUrl   = (urlInp?.value || '').trim();
+
+  if (!rawUrl) {
+    if (statusEl) { statusEl.style.color = 'var(--orange)'; statusEl.textContent = '⚠ Please enter a MAL ID + episode, or paste a URL directly.'; }
+    return;
+  }
+  if (statusEl) { statusEl.style.color = 'var(--text3)'; statusEl.textContent = '⏳ Loading Megaply HLS stream…'; }
+  if (qRow) { qRow.style.display = 'none'; qRow.innerHTML = ''; }
+
+  // Destroy any existing hls.js instance for this panel
+  if (_megaplyHlsInstance) { try { _megaplyHlsInstance.destroy(); } catch (_) {} _megaplyHlsInstance = null; }
+
+  // Hide all iframes + existing video
+  ['pf-plain','pf-sb','pf-adblock'].forEach(id => {
+    const f = document.getElementById(id); if (!f) return;
+    f.style.display = 'none'; try { f.src = 'about:blank'; } catch (_) {}
+  });
+  if (ph) ph.style.display = 'none';
+  const existHlsVid = document.getElementById('hls-video-el');
+  if (existHlsVid) { existHlsVid.style.display = 'none'; try { existHlsVid.pause(); } catch(_) {} }
+
+  // Detect if it's a direct .m3u8 — stream via hls.js
+  const isM3U8 = /\.m3u8(\?|$)/i.test(rawUrl);
+
+  if (isM3U8) {
+    // Use hls.js native player
+    ensureHlsJS(() => {
+      let videoEl = document.getElementById('megaply-video-el');
+      if (!videoEl) {
+        videoEl = document.createElement('video');
+        videoEl.id = 'megaply-video-el';
+        videoEl.controls = true;
+        videoEl.crossOrigin = 'anonymous';
+        videoEl.playsInline = true;
+        videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;background:#000;';
+        document.getElementById('player-main').appendChild(videoEl);
+      }
+      videoEl.style.display = 'block';
+
+      if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+        const hlsInst = new Hls(buildHlsConfig({}));
+        _megaplyHlsInstance = hlsInst;
+        hlsInst.loadSource(rawUrl);
+        hlsInst.attachMedia(videoEl);
+        hlsInst.on(Hls.Events.MANIFEST_PARSED, (ev, data) => {
+          if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = `✓ Megaply HLS stream loaded${data.levels?.length > 1 ? ` — ${data.levels.length} quality levels` : ''}`; }
+          buildHlsQualityUI(hlsInst, data.levels || []);
+          videoEl.play().catch(() => {});
+        });
+        attachBufferIndicator(videoEl, statusEl);
+        attachHlsErrorRecovery(hlsInst, videoEl, statusEl, {
+          onFatal: () => {
+            try { hlsInst.destroy(); } catch (_) {}
+            _megaplyHlsInstance = null;
+            videoEl.src = rawUrl;
+            videoEl.play().catch(() => {});
+          }
+        });
+      } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+        videoEl.src = rawUrl;
+        videoEl.play().catch(() => {});
+        if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Native HLS playback'; }
+      } else {
+        videoEl.src = rawUrl;
+        videoEl.play().catch(() => {});
+        if (statusEl) { statusEl.style.color = 'var(--text2)'; statusEl.textContent = '▶ Playing direct'; }
+      }
+    });
+  } else {
+    // Treat as iframe embed (e.g. the HTML wrapper pages from ytbro8326-sudo.github.io)
+    const existMplyVid = document.getElementById('megaply-video-el');
+    if (existMplyVid) { existMplyVid.style.display = 'none'; try { existMplyVid.pause(); } catch(_) {} }
+
+    let ifrEl = document.getElementById('megaply-iframe-el');
+    if (!ifrEl) {
+      ifrEl = document.createElement('iframe');
+      ifrEl.id = 'megaply-iframe-el';
+      ifrEl.allowFullscreen = true;
+      ifrEl.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture');
+      ifrEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:3;border:none;background:#000;';
+      document.getElementById('player-main').appendChild(ifrEl);
+    }
+    ifrEl.style.display = 'block';
+    ifrEl.src = rawUrl;
+    if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Megaply stream loaded in player'; }
+    watchEnd(ifrEl, playerMalId, playerEp, playerLang);
+  }
+}
+
+// Called from loadEpisode whenever a new episode starts — keeps the
+// Megaply panel in sync with the current anime & episode automatically.
+function syncMegaplyPanel(malId, ep) {
+  const urlInp   = document.getElementById('mply-url-inp');
+  const malidInp = document.getElementById('mply-malid-inp');
+  const epInp    = document.getElementById('mply-ep-inp');
+  if (!urlInp || !malidInp || !epInp) return;
+  malidInp.value = malId || '';
+  epInp.value    = ep    || '';
+  // Only overwrite URL if the user hasn't typed their own
+  if (urlInp.dataset.userEdited !== '1' && malId && ep) {
+    urlInp.value = buildMegaplyUrl(malId, ep);
+  }
+}
+
 function updateSrcTabOpacity() {
   document.getElementById('tab-ac').style.opacity = serverData.length ? '1' : '0.4';
   document.getElementById('tab-hi').style.opacity = hianimeEntry ? '1' : '0.4';
   document.getElementById('tab-agg').style.opacity = playerMalId ? '1' : '0.4';
   document.getElementById('tab-anidb').style.opacity = anidbEntry ? '1' : '0.4';
   document.getElementById('tab-m4u').style.opacity = (m4uSeriesEntry || m4uMovieEntry) ? '1' : '0.4';
+  document.getElementById('tab-mply').style.opacity = playerMalId ? '1' : '0.4';
 }
 
 // ═══════════════════════════════════════════════════════════
